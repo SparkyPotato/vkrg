@@ -1,4 +1,7 @@
-use std::sync::Mutex;
+use std::{
+	mem::ManuallyDrop,
+	sync::{Mutex, MutexGuard},
+};
 
 use ash::{
 	extensions::{ext::DebugUtils, khr::Surface},
@@ -6,9 +9,11 @@ use ash::{
 	Entry,
 	Instance,
 };
+use gpu_allocator::vulkan::Allocator;
 
-use crate::Result;
+use crate::{device::descriptor::Descriptors, Result};
 
+pub mod descriptor;
 mod init;
 
 /// Has everything you need to do Vulkan stuff.
@@ -21,6 +26,8 @@ pub struct Device {
 	surface_ext: Option<Surface>,
 	debug_utils_ext: Option<DebugUtils>,
 	queues: Queues<QueueData>,
+	allocator: ManuallyDrop<Mutex<Allocator>>,
+	descriptors: Descriptors,
 }
 
 struct QueueData {
@@ -28,7 +35,7 @@ struct QueueData {
 	family: u32,
 }
 
-enum Queues<T> {
+pub enum Queues<T> {
 	Separate {
 		graphics: T, // Also supports presentation.
 		compute: T,
@@ -38,7 +45,7 @@ enum Queues<T> {
 }
 
 impl<T> Queues<T> {
-	fn map<U>(self, mut f: impl FnMut(T) -> U) -> Queues<U> {
+	fn map<U>(&self, mut f: impl FnMut(&T) -> U) -> Queues<U> {
 		match self {
 			Queues::Separate {
 				graphics,
@@ -65,7 +72,13 @@ impl Device {
 
 	pub fn surface_ext(&self) -> Option<&Surface> { self.surface_ext.as_ref() }
 
-	/// # SAFETY
+	pub fn queue_families(&self) -> Queues<u32> { self.queues.map(|data| data.family) }
+
+	pub fn allocator(&self) -> MutexGuard<'_, Allocator> { self.allocator.lock().unwrap() }
+
+	pub fn base_descriptors(&self) -> &Descriptors { &self.descriptors }
+
+	/// # Safety
 	/// Thread-safety is handled, nothing else is.
 	pub unsafe fn submit_graphics(&self, submits: &[SubmitInfo2], fence: Fence) -> Result<()> {
 		match &self.queues {
@@ -82,7 +95,7 @@ impl Device {
 		Ok(())
 	}
 
-	/// # SAFETY
+	/// # Safety
 	/// Thread-safety is handled, nothing else is.
 	pub unsafe fn submit_compute(&self, submits: &[SubmitInfo2], fence: Fence) -> Result<()> {
 		match &self.queues {
@@ -99,7 +112,7 @@ impl Device {
 		Ok(())
 	}
 
-	/// # SAFETY
+	/// # Safety
 	/// Thread-safety is handled, nothing else is.
 	pub unsafe fn submit_transfer(&self, submits: &[SubmitInfo2], fence: Fence) -> Result<()> {
 		match &self.queues {
@@ -120,6 +133,10 @@ impl Device {
 impl Drop for Device {
 	fn drop(&mut self) {
 		unsafe {
+			// Drop the allocator before the device.
+			ManuallyDrop::drop(&mut self.allocator);
+			self.descriptors.cleanup(&self.device);
+
 			self.device.destroy_device(None);
 
 			if let Some(utils) = self.debug_utils_ext.as_ref() {

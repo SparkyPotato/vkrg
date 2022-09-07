@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Display};
 
 pub mod device;
+pub mod graph;
 
 #[derive(Clone)]
 pub enum Error {

@@ -1,5 +1,6 @@
 use std::{
 	ffi::{c_void, CStr},
+	mem::ManuallyDrop,
 	num::NonZeroU64,
 	sync::Mutex,
 };
@@ -38,11 +39,16 @@ use ash::{
 	Entry,
 	Instance,
 };
+use gpu_allocator::{
+	vulkan::{Allocator, AllocatorCreateDesc},
+	AllocatorDebugSettings,
+};
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle};
 use tracing::{error, info, trace, warn};
 
 use crate::{
-	device::{Device, QueueData, Queues},
+	device::{descriptor::Descriptors, Device, QueueData, Queues},
+	Error,
 	Result,
 };
 
@@ -115,6 +121,17 @@ impl Device {
 			device_extensions,
 		)?;
 
+		let allocator = Allocator::new(&AllocatorCreateDesc {
+			instance: instance.clone(),
+			device: device.clone(),
+			physical_device,
+			debug_settings: AllocatorDebugSettings::default(),
+			buffer_device_address: false,
+		})
+		.map_err(|e| Error::Message(e.to_string()))?;
+
+		let descriptors = Descriptors::new(&device)?;
+
 		Ok((
 			Self {
 				entry,
@@ -125,6 +142,8 @@ impl Device {
 				device,
 				physical_device,
 				queues,
+				allocator: ManuallyDrop::new(Mutex::new(allocator)),
+				descriptors,
 			},
 			s,
 		))
@@ -509,8 +528,8 @@ impl Device {
 		};
 
 		let queues = queues.map(|index| QueueData {
-			queue: Mutex::new(unsafe { device.get_device_queue(index, 0) }),
-			family: index,
+			queue: Mutex::new(unsafe { device.get_device_queue(*index, 0) }),
+			family: *index,
 		});
 
 		Ok((device, physical_device, queues))
