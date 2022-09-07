@@ -202,7 +202,7 @@ impl Descriptors {
 		ImageId(index)
 	}
 
-	pub fn get_storage_image(&self, device: &Device, image: ImageView) -> ImageId {
+	pub fn get_storage_image(&self, device: &Device, image: ImageView) -> StorageImageId {
 		let mut inner = self.inner.lock().unwrap();
 
 		let index = inner.storage_images.get_index();
@@ -221,7 +221,7 @@ impl Descriptors {
 			device.update_descriptor_sets(&[write], &[]);
 		}
 
-		ImageId(index)
+		StorageImageId(index)
 	}
 
 	pub fn get_sampler(&self, device: &Device, sampler: Sampler) -> SamplerId {
@@ -253,7 +253,7 @@ impl Descriptors {
 		inner.sampled_images.return_index(index.0);
 	}
 
-	pub fn return_storage_image(&self, index: ImageId) {
+	pub fn return_storage_image(&self, index: StorageImageId) {
 		let mut inner = self.inner.lock().unwrap();
 		inner.storage_images.return_index(index.0);
 	}

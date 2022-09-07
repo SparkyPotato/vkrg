@@ -28,7 +28,7 @@ use gpu_allocator::{
 
 use crate::{
 	device::{
-		descriptor::{BufferId, ImageId},
+		descriptor::{BufferId, ImageId, StorageImageId},
 		Device,
 		Queues,
 	},
@@ -141,6 +141,10 @@ impl Resource for UploadBuffer {
 	}
 
 	unsafe fn destroy(&mut self, device: &Device) {
+		if let Some(id) = self.id {
+			device.base_descriptors().return_buffer(id);
+		}
+
 		let _ = device.allocator().free(std::mem::take(&mut self.alloc));
 		device.device().destroy_buffer(self.inner, None);
 	}
@@ -218,6 +222,10 @@ impl Resource for GpuBuffer {
 	}
 
 	unsafe fn destroy(&mut self, device: &Device) {
+		if let Some(id) = self.id {
+			device.base_descriptors().return_buffer(id);
+		}
+
 		let _ = device.allocator().free(std::mem::take(&mut self.alloc));
 		device.device().destroy_buffer(self.inner, None);
 	}
@@ -276,7 +284,7 @@ impl Resource for Image {
 					.array_layers(desc.layers)
 					.samples(desc.samples)
 					.usage(desc.usage)
-					.sharing_mode(SharingMode::CONCURRENT)
+					.sharing_mode(SharingMode::EXCLUSIVE)
 					.initial_layout(ImageLayout::UNDEFINED),
 				None,
 			)?
@@ -320,7 +328,7 @@ pub struct ImageViewDesc {
 pub struct ImageView {
 	inner: ash::vk::ImageView,
 	id: Option<ImageId>,
-	storage_id: Option<ImageId>,
+	storage_id: Option<StorageImageId>,
 }
 
 impl Resource for ImageView {
@@ -374,19 +382,11 @@ impl Resource for ImageView {
 				),
 				ImageViewUsage::Storage => (
 					None,
-					Some(
-						device
-							.base_descriptors()
-							.get_image(device.device(), view, ImageLayout::GENERAL),
-					),
+					Some(device.base_descriptors().get_storage_image(device.device(), view)),
 				),
 				ImageViewUsage::Both => (
 					Some(device.base_descriptors().get_image(device.device(), view, layout)),
-					Some(
-						device
-							.base_descriptors()
-							.get_image(device.device(), view, ImageLayout::GENERAL),
-					),
+					Some(device.base_descriptors().get_storage_image(device.device(), view)),
 				),
 			};
 
@@ -400,6 +400,12 @@ impl Resource for ImageView {
 
 	unsafe fn destroy(&mut self, device: &Device) {
 		unsafe {
+			if let Some(id) = self.id {
+				device.base_descriptors().return_image(id);
+			}
+			if let Some(id) = self.storage_id {
+				device.base_descriptors().return_storage_image(id);
+			}
 			device.device().destroy_image_view(self.inner, None);
 		}
 	}

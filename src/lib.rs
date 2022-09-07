@@ -1,5 +1,9 @@
+#![feature(allocator_api)]
+#![feature(ptr_metadata)]
+
 use std::fmt::{Debug, Display};
 
+pub mod arena;
 pub mod device;
 pub mod graph;
 

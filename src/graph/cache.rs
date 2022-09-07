@@ -114,7 +114,7 @@ mod tests {
 
 			fn create(_: &Device, _: Self::Desc) -> Result<Self> { Ok(Resource) }
 
-			unsafe fn destroy(&self, _: &Device) {}
+			unsafe fn destroy(&mut self, _: &Device) {}
 		}
 
 		let device = Device::new().unwrap();
