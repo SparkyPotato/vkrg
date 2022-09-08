@@ -1,7 +1,10 @@
 #![feature(allocator_api)]
 #![feature(ptr_metadata)]
+#![feature(strict_provenance)]
 
 use std::fmt::{Debug, Display};
+
+pub use ash;
 
 pub mod arena;
 pub mod device;

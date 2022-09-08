@@ -2,7 +2,6 @@ use std::{
 	alloc::{handle_alloc_error, AllocError, Allocator, Global, Layout},
 	cell::UnsafeCell,
 	ptr::{addr_of_mut, NonNull},
-	slice::from_raw_parts_mut,
 };
 
 use tracing::trace;
@@ -33,7 +32,7 @@ struct Inner {
 	head: NonNull<Block>,
 	curr_block: NonNull<Block>,
 	alloc_count: usize,
-	last_alloc: NonNull<u8>,
+	last_alloc: usize,
 }
 
 impl Arena {
@@ -50,7 +49,7 @@ impl Arena {
 				head,
 				curr_block: head,
 				alloc_count: 0,
-				last_alloc: NonNull::dangling(),
+				last_alloc: 0,
 			}),
 		}
 	}
@@ -66,10 +65,10 @@ impl Arena {
 	unsafe fn reset_all_blocks(&self) {
 		let inner = self.inner.get();
 		let mut block = Some((*inner).head);
-		while let Some(mut b) = block {
-			let mut prev = b;
-			block = b.as_mut().header.next;
-			prev.as_mut().header.offset = 0;
+		while let Some(b) = block {
+			let prev = b;
+			block = (*b.as_ptr()).header.next;
+			(*prev.as_ptr()).header.offset = 0;
 		}
 	}
 
@@ -84,11 +83,11 @@ impl Arena {
 
 	fn allocate_block(size: usize) -> Result<NonNull<Block>, AllocError> {
 		unsafe {
-			let mut head: NonNull<Block> = Global
+			let head: NonNull<Block> = Global
 				.allocate(Self::block_layout(size))
 				.map(|ptr| NonNull::new_unchecked(std::ptr::from_raw_parts_mut(ptr.as_ptr() as *mut (), size)))?;
 
-			addr_of_mut!(head.as_mut().header).write(BlockHeader { next: None, offset: 0 });
+			addr_of_mut!((*head.as_ptr()).header).write(BlockHeader { next: None, offset: 0 });
 
 			Ok(head)
 		}
@@ -100,7 +99,7 @@ impl Arena {
 		let inner = self.inner.get();
 		let new = Self::allocate_block(size)?;
 		unsafe {
-			(*inner).curr_block.as_mut().header.next = Some(new);
+			(*(*inner).curr_block.as_ptr()).header.next = Some(new);
 			(*inner).curr_block = new;
 		}
 
@@ -109,9 +108,9 @@ impl Arena {
 
 	fn aligned_offset(&self, align: usize) -> usize {
 		unsafe {
-			let curr = (*self.inner.get()).curr_block.as_ref();
-			let base = curr.data.as_ptr();
-			let unaligned = base.add(curr.header.offset) as usize;
+			let curr = (*self.inner.get()).curr_block.as_ptr();
+			let base = (*curr).data.as_ptr();
+			let unaligned = base.add((*curr).header.offset) as usize;
 			let aligned = (unaligned + align - 1) & !(align - 1);
 			aligned - base as usize
 		}
@@ -120,45 +119,43 @@ impl Arena {
 
 unsafe impl Allocator for Arena {
 	fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-		// SAFETY: I said so (and miri agrees).
+		// SAFETY: Uh.
 		unsafe {
 			let inner = self.inner.get();
 
-			let ret = if layout.size() > (*inner).curr_block.as_ref().data.len() {
+			let (ptr, offset) = if layout.size() > (*(*inner).curr_block.as_ptr()).data.len() {
 				// Allocate a dedicated block for this, since it's too big for our current block size.
-				Ok(self.extend(layout.size())?.as_mut().data.into())
+				let ptr = addr_of_mut!((*self.extend(layout.size())?.as_ptr()).data).cast();
+				(ptr, layout.size())
 			} else {
-				let offset = self.aligned_offset(layout.align());
-
-				let target = if offset + layout.size() > (*inner).curr_block.as_ref().data.len() {
+				let mut offset = self.aligned_offset(layout.align());
+				if offset + layout.size() > (*(*inner).curr_block.as_ptr()).data.len() {
 					// There's not enough space in the current block, so go to the next one.
-					if let Some(next) = (*inner).curr_block.as_mut().header.next {
+					if let Some(next) = (*(*inner).curr_block.as_ptr()).header.next {
 						// There's a next block, so we can use it.
 						(*inner).curr_block = next;
 					} else {
 						// There's no next block, so we need to allocate a new one.
-						self.extend((*inner).curr_block.as_ref().data.len())?;
+						self.extend((*(*inner).curr_block.as_ptr()).data.len())?;
 					}
 
-					let offset = self.aligned_offset(layout.align());
-					(*inner).curr_block.as_mut().data.as_mut_ptr().add(offset)
-				} else {
-					// There's enough space in the current block, so use it.
-					(*inner).curr_block.as_mut().data.as_mut_ptr().add(offset)
-				};
+					offset = self.aligned_offset(layout.align());
+				}
 
-				(*inner).curr_block.as_mut().header.offset += layout.size();
-				Ok(NonNull::new_unchecked(from_raw_parts_mut(target, layout.size())))
+				let target = addr_of_mut!((*(*inner).curr_block.as_ptr()).data)
+					.cast::<u8>()
+					.add(offset);
+				(target, offset + layout.size())
 			};
 
-			match ret {
-				Ok(ptr) => {
-					(*inner).alloc_count += 1;
-					(*inner).last_alloc = ptr.cast();
-					Ok(ptr)
-				},
-				x => x,
-			}
+			(*inner).alloc_count += 1;
+			(*inner).last_alloc = ptr.to_raw_parts().0.addr();
+			(*(*inner).curr_block.as_ptr()).header.offset = offset;
+
+			Ok(NonNull::new_unchecked(std::ptr::from_raw_parts_mut(
+				ptr as _,
+				layout.size(),
+			)))
 		}
 	}
 
@@ -168,9 +165,9 @@ unsafe impl Allocator for Arena {
 		(*inner).alloc_count -= 1;
 		if (*inner).alloc_count == 0 {
 			self.reset_all_blocks()
-		} else if ptr == (*inner).last_alloc {
-			let offset = ptr.as_ptr().offset_from((*inner).curr_block.as_ref().data.as_ptr());
-			(*inner).curr_block.as_mut().header.offset = offset as _;
+		} else if ptr.addr().get() == (*inner).last_alloc {
+			let offset = ptr.as_ptr().offset_from((*(*inner).curr_block.as_ptr()).data.as_ptr());
+			(*(*inner).curr_block.as_ptr()).header.offset = offset as _;
 		}
 	}
 
@@ -179,31 +176,23 @@ unsafe impl Allocator for Arena {
 	) -> Result<NonNull<[u8]>, AllocError> {
 		let inner = self.inner.get();
 
-		if ptr == (*inner).last_alloc {
-			let offset = ptr.as_ptr().offset_from((*inner).curr_block.as_ref().data.as_ptr());
+		if ptr.addr().get() == (*inner).last_alloc {
+			// Reuse the last allocation if possible.
+			let offset = ptr.as_ptr().offset_from((*(*inner).curr_block.as_ptr()).data.as_ptr());
 			let new_offset = offset as usize + new_layout.size();
-			if new_offset <= (*inner).curr_block.as_ref().data.len() {
-				(*inner).curr_block.as_mut().header.offset = new_offset;
-				Ok(NonNull::new_unchecked(from_raw_parts_mut(
-					ptr.as_ptr(),
+			if new_offset <= (*(*inner).curr_block.as_ptr()).data.len() {
+				(*(*inner).curr_block.as_ptr()).header.offset = new_offset;
+				return Ok(NonNull::new_unchecked(std::ptr::from_raw_parts_mut(
+					ptr.as_ptr() as _,
 					new_layout.size(),
-				)))
-			} else {
-				let new_ptr = self.allocate(new_layout)?;
-
-				std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_ptr() as *mut _, old_layout.size());
-				self.deallocate(ptr, old_layout);
-
-				Ok(new_ptr)
+				)));
 			}
-		} else {
-			let new_ptr = self.allocate(new_layout)?;
-
-			std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_ptr() as *mut _, old_layout.size());
-			self.deallocate(ptr, old_layout);
-
-			Ok(new_ptr)
 		}
+
+		let new_ptr = self.allocate(new_layout)?;
+		std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_ptr() as *mut _, old_layout.size());
+		(*inner).alloc_count -= 1;
+		Ok(new_ptr)
 	}
 }
 
@@ -234,11 +223,11 @@ mod tests {
 			let a = arena.allocate(Layout::new::<u32>()).unwrap().as_ptr() as *mut u32;
 			let b = arena.allocate(Layout::new::<u32>()).unwrap().as_ptr() as *mut u32;
 
-			*a = 0xDEADBEEF;
-			*b = 0xCAFEBABE;
+			*a = 123;
+			*b = 456;
 
-			assert_eq!(*a, 0xDEADBEEF);
-			assert_eq!(*b, 0xCAFEBABE);
+			assert_eq!(*a, 123);
+			assert_eq!(*b, 456);
 		}
 	}
 
@@ -246,25 +235,8 @@ mod tests {
 	fn allocate_over_size() {
 		let arena = Arena::with_block_size(256);
 
-		let vec = Vec::<u8, &Arena>::with_capacity_in(178, &arena);
-		let vec = Vec::<u8, &Arena>::with_capacity_in(128, &arena);
-	}
-
-	#[test]
-	fn reset() {
-		let arena = Arena::new();
-
-		unsafe {
-			let a = arena.allocate(Layout::new::<u32>()).unwrap().as_ptr() as *mut u32;
-			arena.reset_all_blocks();
-			let b = arena.allocate(Layout::new::<u32>()).unwrap().as_ptr() as *mut u32;
-
-			*a = 0xDEADBEEF;
-			*b = 0xCAFEBABE;
-
-			assert_eq!(*a, 0xCAFEBABE);
-			assert_eq!(*b, 0xCAFEBABE);
-		}
+		let _vec = Vec::<u8, &Arena>::with_capacity_in(178, &arena);
+		let _vec = Vec::<u8, &Arena>::with_capacity_in(128, &arena);
 	}
 
 	#[test]
