@@ -6,7 +6,8 @@ mod data {
 	#[test]
 	fn basic() {
 		let arena = Arena::new();
-		let mut graph = RenderGraph::new();
+		let device = Device::new().unwrap();
+		let mut graph = RenderGraph::new(&device).unwrap();
 
 		for _ in 0..2 {
 			let mut frame = graph.frame(&arena);
@@ -16,9 +17,7 @@ mod data {
 			let mut p1 = frame.pass("Pass 1");
 			let (set, get) = p1.data_output::<Data>();
 			p1.build(|mut ctx| {
-				let mut v = Vec::new_in(ctx.arena());
-				v.push(1);
-				v.push(2);
+				let v = collect_allocated_vec([1, 2], ctx.arena);
 				ctx.set_data(set, Data(v));
 			});
 
@@ -29,7 +28,7 @@ mod data {
 				assert_eq!(data.0, vec![1, 2]);
 			});
 
-			frame.run();
+			frame.run(&device).unwrap();
 		}
 	}
 
@@ -37,7 +36,8 @@ mod data {
 	#[should_panic]
 	fn try_access_data_from_previous_frame() {
 		let arena = Arena::new();
-		let mut graph = RenderGraph::new();
+		let device = Device::new().unwrap();
+		let mut graph = RenderGraph::new(&device).unwrap();
 
 		struct Data<'graph>(Vec<usize, &'graph Arena>);
 
@@ -48,7 +48,7 @@ mod data {
 			let mut p1 = frame.pass("Pass 1");
 			let (set, get) = p1.data_output::<Data>();
 			p1.build(|mut ctx| {
-				let mut v = Vec::new_in(ctx.arena());
+				let mut v = Vec::new_in(ctx.arena);
 				v.push(1);
 				v.push(2);
 				ctx.set_data(set, Data(v));
@@ -66,7 +66,7 @@ mod data {
 				}
 			});
 
-			frame.run();
+			frame.run(&device).unwrap();
 
 			id = Some(ref_id);
 		}

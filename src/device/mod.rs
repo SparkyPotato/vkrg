@@ -59,6 +59,27 @@ impl<T> Queues<T> {
 			Queues::Single(queue) => Queues::Single(f(queue)),
 		}
 	}
+
+	pub fn graphics(&self) -> &T {
+		match self {
+			Queues::Separate { graphics, .. } => graphics,
+			Queues::Single(queue) => queue,
+		}
+	}
+
+	pub fn compute(&self) -> &T {
+		match self {
+			Queues::Separate { compute, .. } => compute,
+			Queues::Single(queue) => queue,
+		}
+	}
+
+	pub fn transfer(&self) -> &T {
+		match self {
+			Queues::Separate { transfer, .. } => transfer,
+			Queues::Single(queue) => queue,
+		}
+	}
 }
 
 impl Device {

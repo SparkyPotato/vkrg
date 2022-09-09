@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 ash = "0.37.0"
 gpu-allocator = { version = "0.19.1", features = ["vulkan"] }
+hashbrown = { version = "0.12.3", features = ["nightly"] }
 raw-window-handle = "0.5.0"
 rustc-hash = "1.1.0"
 tracing = "0.1.36"

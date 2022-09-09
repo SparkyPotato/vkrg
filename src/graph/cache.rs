@@ -1,6 +1,10 @@
+use std::collections::hash_map::Entry;
+
 use rustc_hash::FxHashMap;
 
 use crate::{device::Device, graph::resource::Resource, Result};
+
+const DESTROY_LAG: u8 = 2;
 
 /// A resource that has its usage generations tracked.
 struct TrackedResource<T: Resource> {
@@ -17,8 +21,6 @@ struct ResourceList<T: Resource> {
 }
 
 impl<T: Resource> ResourceList<T> {
-	const DESTROY_LAG: u8 = 2;
-
 	pub fn new() -> Self {
 		Self {
 			cursor: 0,
@@ -53,7 +55,7 @@ impl<T: Resource> ResourceList<T> {
 		for resource in self.resources[self.cursor..].iter_mut() {
 			// Everything after this has not been used for at least `DESTROY_LAG` generations.
 			resource.unused += 1;
-			if resource.unused >= Self::DESTROY_LAG {
+			if resource.unused >= DESTROY_LAG {
 				break;
 			}
 			first_destroyable += 1;
@@ -62,6 +64,14 @@ impl<T: Resource> ResourceList<T> {
 			resource.inner.destroy(device);
 		}
 		self.cursor = 0;
+	}
+
+	pub fn destroy(self, device: &Device) {
+		for mut resource in self.resources {
+			unsafe {
+				resource.inner.destroy(device);
+			}
+		}
 	}
 }
 
@@ -91,6 +101,69 @@ impl<T: Resource> ResourceCache<T> {
 	pub fn get(&mut self, device: &Device, desc: T::Desc) -> Result<T::Handle> {
 		let list = self.resources.entry(desc).or_insert_with(ResourceList::new);
 		list.get_or_create(device, desc)
+	}
+
+	pub fn destroy(self, device: &Device) {
+		for (_, list) in self.resources {
+			list.destroy(device);
+		}
+	}
+}
+
+pub struct UniqueCache<T: Resource> {
+	resources: FxHashMap<T::Desc, TrackedResource<T>>,
+}
+
+impl<T: Resource> UniqueCache<T> {
+	/// Create an empty cache.
+	pub fn new() -> Self {
+		Self {
+			resources: FxHashMap::default(),
+		}
+	}
+
+	/// Get an unused resource with the given descriptor. Is valid until [`Self::reset`] is called.
+	pub fn get(&mut self, device: &Device, desc: T::Desc) -> Result<T::Handle> {
+		match self.resources.entry(desc) {
+			Entry::Vacant(v) => {
+				let resource = T::create(device, v.key().clone())?;
+				let handle = resource.handle();
+				v.insert(TrackedResource {
+					inner: resource,
+					unused: 0,
+				});
+				Ok(handle)
+			},
+			Entry::Occupied(mut o) => {
+				let o = o.get_mut();
+				o.unused = 0;
+				Ok(o.inner.handle())
+			},
+		}
+	}
+
+	/// Reset the cache, incrementing the generation.
+	///
+	/// # Safety
+	/// All resources returned by [`Self::get`] must not be used after this call.
+	pub unsafe fn reset(&mut self, device: &Device) {
+		self.resources.retain(|_, res| {
+			res.unused += 1;
+			if res.unused >= DESTROY_LAG {
+				res.inner.destroy(device);
+				false
+			} else {
+				true
+			}
+		})
+	}
+
+	pub fn destroy(self, device: &Device) {
+		for (_, mut res) in self.resources {
+			unsafe {
+				res.inner.destroy(device);
+			}
+		}
 	}
 }
 

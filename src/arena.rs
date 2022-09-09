@@ -6,7 +6,8 @@ use std::{
 
 use tracing::trace;
 
-pub fn collect_allocated_vec<T, A: Allocator>(iter: impl Iterator<Item = T>, alloc: A) -> Vec<T, A> {
+pub fn collect_allocated_vec<T, A: Allocator>(iter: impl IntoIterator<Item = T>, alloc: A) -> Vec<T, A> {
+	let iter = iter.into_iter();
 	let mut vec = Vec::new_in(alloc);
 	vec.extend(iter);
 	vec

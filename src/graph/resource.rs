@@ -49,14 +49,14 @@ pub trait Resource {
 	unsafe fn destroy(&mut self, device: &Device);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct UploadBufferHandle {
 	pub buffer: ash::vk::Buffer,
 	pub id: Option<BufferId>,
 	pub data: NonNull<[u8]>,
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum UploadBufferUsage {
 	Shader,
 	Index,
@@ -64,7 +64,7 @@ pub enum UploadBufferUsage {
 	Indirect,
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct UploadBufferDesc {
 	pub size: usize,
 	pub usage: UploadBufferUsage,
@@ -150,13 +150,13 @@ impl Resource for UploadBuffer {
 	}
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct GpuBufferHandle {
 	pub buffer: ash::vk::Buffer,
 	pub id: Option<BufferId>,
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct GpuBufferDesc {
 	pub size: usize,
 	pub usage: BufferUsageFlags,
@@ -231,14 +231,15 @@ impl Resource for GpuBuffer {
 	}
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum ImageFlags {
+	None,
 	Cube,
 	Array,
 	CubeAndArray,
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageDesc {
 	pub flags: ImageFlags,
 	pub format: Format,
@@ -265,6 +266,7 @@ impl Resource for Image {
 			device.device().create_image(
 				&ImageCreateInfo::builder()
 					.flags(match desc.flags {
+						ImageFlags::None => ImageCreateFlags::empty(),
 						ImageFlags::Cube => ImageCreateFlags::CUBE_COMPATIBLE,
 						ImageFlags::Array => ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE,
 						ImageFlags::CubeAndArray => {
@@ -309,14 +311,15 @@ impl Resource for Image {
 	}
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum ImageViewUsage {
+	None,
 	Sampled,
 	Storage,
 	Both,
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageViewDesc {
 	pub image: ash::vk::Image,
 	pub view_type: ImageViewType,
@@ -324,11 +327,11 @@ pub struct ImageViewDesc {
 	pub usage: ImageViewUsage,
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageView {
-	inner: ash::vk::ImageView,
-	id: Option<ImageId>,
-	storage_id: Option<StorageImageId>,
+	pub inner: ash::vk::ImageView,
+	pub id: Option<ImageId>,
+	pub storage_id: Option<StorageImageId>,
 }
 
 impl Resource for ImageView {
@@ -376,6 +379,7 @@ impl Resource for ImageView {
 				_ => ImageLayout::SHADER_READ_ONLY_OPTIMAL,
 			};
 			let (id, storage_id) = match desc.usage {
+				ImageViewUsage::None => (None, None),
 				ImageViewUsage::Sampled => (
 					Some(device.base_descriptors().get_image(device.device(), view, layout)),
 					None,
