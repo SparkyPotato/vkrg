@@ -1,16 +1,42 @@
 use std::{
 	alloc::{handle_alloc_error, AllocError, Allocator, Global, Layout},
 	cell::UnsafeCell,
+	collections::BTreeMap,
 	ptr::{addr_of_mut, NonNull},
 };
 
 use tracing::trace;
 
-pub fn collect_allocated_vec<T, A: Allocator>(iter: impl IntoIterator<Item = T>, alloc: A) -> Vec<T, A> {
-	let iter = iter.into_iter();
-	let mut vec = Vec::new_in(alloc);
-	vec.extend(iter);
-	vec
+pub trait FromIteratorAlloc<T, A: Allocator>: Sized {
+	fn from_iter_alloc<I: IntoIterator<Item = T>>(iter: I, alloc: A) -> Self;
+}
+
+pub trait IteratorAlloc: Iterator {
+	fn collect_in<A: Allocator, C: FromIteratorAlloc<Self::Item, A>>(self, alloc: A) -> C;
+}
+
+impl<I: Iterator> IteratorAlloc for I {
+	fn collect_in<A: Allocator, C: FromIteratorAlloc<Self::Item, A>>(self, alloc: A) -> C {
+		C::from_iter_alloc(self, alloc)
+	}
+}
+
+impl<T, A: Allocator> FromIteratorAlloc<T, A> for Vec<T, A> {
+	fn from_iter_alloc<I: IntoIterator<Item = T>>(iter: I, alloc: A) -> Self {
+		let iter = iter.into_iter();
+		let mut vec = Vec::new_in(alloc);
+		vec.extend(iter);
+		vec
+	}
+}
+
+impl<K: Ord, V, A: Allocator + Clone> FromIteratorAlloc<(K, V), A> for BTreeMap<K, V, A> {
+	fn from_iter_alloc<I: IntoIterator<Item = (K, V)>>(iter: I, alloc: A) -> Self {
+		let iter = iter.into_iter();
+		let mut map = BTreeMap::new_in(alloc);
+		map.extend(iter);
+		map
+	}
 }
 
 #[repr(C, align(8))]
@@ -56,20 +82,31 @@ impl Arena {
 	}
 
 	pub fn reset(&mut self) {
-		assert_eq!(
-			self.inner.get_mut().alloc_count,
-			0,
-			"tried to reset Arena with living allocations"
-		);
+		let count = self.inner.get_mut().alloc_count;
+		if count != 0 {
+			panic!("tried to reset Arena with living allocations ({})", count);
+		}
+	}
+
+	pub unsafe fn deallocate(&self, ptr: NonNull<u8>) {
+		let inner = self.inner.get();
+
+		(*inner).alloc_count -= 1;
+		if unlikely((*inner).alloc_count == 0) {
+			self.reset_all_blocks()
+		} else if ptr.addr().get() == (*inner).last_alloc {
+			let offset = ptr.as_ptr().offset_from((*(*inner).curr_block.as_ptr()).data.as_ptr());
+			(*(*inner).curr_block.as_ptr()).header.offset = offset as _;
+		}
 	}
 
 	unsafe fn reset_all_blocks(&self) {
 		let inner = self.inner.get();
 		let mut block = Some((*inner).head);
 		while let Some(b) = block {
-			let prev = b;
-			block = (*b.as_ptr()).header.next;
-			(*prev.as_ptr()).header.offset = 0;
+			let b = b.as_ptr();
+			(*b).header.offset = 0;
+			block = (*b).header.next;
 		}
 	}
 
@@ -124,13 +161,13 @@ unsafe impl Allocator for Arena {
 		unsafe {
 			let inner = self.inner.get();
 
-			let (ptr, offset) = if layout.size() > (*(*inner).curr_block.as_ptr()).data.len() {
+			let (ptr, offset) = if unlikely(layout.size() > (*(*inner).curr_block.as_ptr()).data.len()) {
 				// Allocate a dedicated block for this, since it's too big for our current block size.
 				let ptr = addr_of_mut!((*self.extend(layout.size())?.as_ptr()).data).cast();
 				(ptr, layout.size())
 			} else {
 				let mut offset = self.aligned_offset(layout.align());
-				if offset + layout.size() > (*(*inner).curr_block.as_ptr()).data.len() {
+				if unlikely(offset + layout.size() > (*(*inner).curr_block.as_ptr()).data.len()) {
 					// There's not enough space in the current block, so go to the next one.
 					if let Some(next) = (*(*inner).curr_block.as_ptr()).header.next {
 						// There's a next block, so we can use it.
@@ -160,17 +197,7 @@ unsafe impl Allocator for Arena {
 		}
 	}
 
-	unsafe fn deallocate(&self, ptr: NonNull<u8>, _: Layout) {
-		let inner = self.inner.get();
-
-		(*inner).alloc_count -= 1;
-		if (*inner).alloc_count == 0 {
-			self.reset_all_blocks()
-		} else if ptr.addr().get() == (*inner).last_alloc {
-			let offset = ptr.as_ptr().offset_from((*(*inner).curr_block.as_ptr()).data.as_ptr());
-			(*(*inner).curr_block.as_ptr()).header.offset = offset as _;
-		}
-	}
+	unsafe fn deallocate(&self, ptr: NonNull<u8>, _: Layout) { self.deallocate(ptr); }
 
 	unsafe fn grow(
 		&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout,
@@ -181,7 +208,7 @@ unsafe impl Allocator for Arena {
 			// Reuse the last allocation if possible.
 			let offset = ptr.as_ptr().offset_from((*(*inner).curr_block.as_ptr()).data.as_ptr());
 			let new_offset = offset as usize + new_layout.size();
-			if new_offset <= (*(*inner).curr_block.as_ptr()).data.len() {
+			if likely(new_offset <= (*(*inner).curr_block.as_ptr()).data.len()) {
 				(*(*inner).curr_block.as_ptr()).header.offset = new_offset;
 				return Ok(NonNull::new_unchecked(std::ptr::from_raw_parts_mut(
 					ptr.as_ptr() as _,
@@ -210,6 +237,26 @@ impl Drop for Arena {
 			}
 		}
 	}
+}
+
+#[inline]
+#[cold]
+fn cold() {}
+
+#[inline]
+fn likely(b: bool) -> bool {
+	if !b {
+		cold()
+	}
+	b
+}
+
+#[inline]
+fn unlikely(b: bool) -> bool {
+	if b {
+		cold()
+	}
+	b
 }
 
 #[cfg(test)]

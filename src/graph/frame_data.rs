@@ -65,6 +65,7 @@ impl TimelineSemaphore {
 
 	pub fn destroy(self, device: &Device) {
 		unsafe {
+			self.wait(device).expect("Failed to wait for semaphore");
 			device.device().destroy_semaphore(self.inner, None);
 		}
 	}
@@ -132,8 +133,8 @@ impl FrameData {
 
 	pub fn destroy(self, device: &Device) {
 		unsafe {
-			device.device().destroy_command_pool(self.pool, None);
 			self.semaphore.destroy(device);
+			device.device().destroy_command_pool(self.pool, None);
 		}
 	}
 }

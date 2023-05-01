@@ -4,10 +4,10 @@ use std::{
 };
 
 use ash::{
-	extensions::{ext::DebugUtils, khr::Surface},
-	vk::{DebugUtilsMessengerEXT, Fence, PhysicalDevice, Queue, SubmitInfo2},
 	Entry,
+	extensions::{ext::DebugUtils, khr::Surface},
 	Instance,
+	vk::{DebugUtilsMessengerEXT, Fence, PhysicalDevice, Queue, SubmitInfo2},
 };
 use gpu_allocator::vulkan::Allocator;
 

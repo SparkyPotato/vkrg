@@ -2,9 +2,9 @@ use std::collections::hash_map::Entry;
 
 use rustc_hash::FxHashMap;
 
-use crate::{device::Device, graph::resource::Resource, Result};
+use crate::{device::Device, graph::FRAMES_IN_FLIGHT, resource::Resource, Result};
 
-const DESTROY_LAG: u8 = 2;
+const DESTROY_LAG: u8 = FRAMES_IN_FLIGHT as _;
 
 /// A resource that has its usage generations tracked.
 struct TrackedResource<T: Resource> {
@@ -60,14 +60,14 @@ impl<T: Resource> ResourceList<T> {
 			}
 			first_destroyable += 1;
 		}
-		for mut resource in self.resources.drain(first_destroyable..).rev() {
+		for resource in self.resources.drain(first_destroyable..).rev() {
 			resource.inner.destroy(device);
 		}
 		self.cursor = 0;
 	}
 
 	pub fn destroy(self, device: &Device) {
-		for mut resource in self.resources {
+		for resource in self.resources {
 			unsafe {
 				resource.inner.destroy(device);
 			}
@@ -92,8 +92,8 @@ impl<T: Resource> ResourceCache<T> {
 	/// # Safety
 	/// All resources returned by [`Self::get`] must not be used after this call.
 	pub unsafe fn reset(&mut self, device: &Device) {
-		for list in self.resources.iter_mut() {
-			list.1.reset(device);
+		for (_, list) in self.resources.iter_mut() {
+			list.reset(device);
 		}
 	}
 
@@ -122,7 +122,7 @@ impl<T: Resource> UniqueCache<T> {
 		}
 	}
 
-	/// Get an unused resource with the given descriptor. Is valid until [`Self::reset`] is called.
+	/// Get the resource with the given descriptor. Is valid until [`Self::reset`] is called.
 	pub fn get(&mut self, device: &Device, desc: T::Desc) -> Result<T::Handle> {
 		match self.resources.entry(desc) {
 			Entry::Vacant(v) => {
@@ -150,7 +150,7 @@ impl<T: Resource> UniqueCache<T> {
 		self.resources.retain(|_, res| {
 			res.unused += 1;
 			if res.unused >= DESTROY_LAG {
-				res.inner.destroy(device);
+				std::mem::take(&mut res.inner).destroy(device);
 				false
 			} else {
 				true
@@ -159,7 +159,7 @@ impl<T: Resource> UniqueCache<T> {
 	}
 
 	pub fn destroy(self, device: &Device) {
-		for (_, mut res) in self.resources {
+		for (_, res) in self.resources {
 			unsafe {
 				res.inner.destroy(device);
 			}
@@ -174,7 +174,7 @@ mod tests {
 
 	#[test]
 	fn resource_list() {
-		#[derive(Copy, Clone)]
+		#[derive(Default, Copy, Clone)]
 		struct Resource;
 		#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 		struct ResourceDesc;
@@ -187,7 +187,7 @@ mod tests {
 
 			fn create(_: &Device, _: Self::Desc) -> Result<Self> { Ok(Resource) }
 
-			unsafe fn destroy(&mut self, _: &Device) {}
+			unsafe fn destroy(self, _: &Device) {}
 		}
 
 		let device = Device::new().unwrap();

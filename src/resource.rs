@@ -36,150 +36,32 @@ use crate::{
 	Result,
 };
 
-pub trait Resource {
-	type Handle: Copy;
+pub trait Resource: Default + Sized {
 	type Desc: Eq + Hash + Copy;
+	type Handle: Copy;
 
 	fn handle(&self) -> Self::Handle;
 
-	fn create(device: &Device, desc: Self::Desc) -> Result<Self>
-	where
-		Self: Sized;
+	fn create(device: &Device, desc: Self::Desc) -> Result<Self>;
 
-	unsafe fn destroy(&mut self, device: &Device);
+	unsafe fn destroy(self, device: &Device);
 }
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
-pub struct UploadBufferHandle {
-	pub buffer: ash::vk::Buffer,
-	pub id: Option<BufferId>,
-	pub data: NonNull<[u8]>,
-}
-
-#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
-pub enum UploadBufferUsage {
-	Shader,
-	Index,
-	Copy,
-	Indirect,
-}
-
-#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
-pub struct UploadBufferDesc {
-	pub size: usize,
-	pub usage: UploadBufferUsage,
-}
-
-pub struct UploadBuffer {
-	inner: ash::vk::Buffer,
-	alloc: Allocation,
-	id: Option<BufferId>,
-}
-
-impl Resource for UploadBuffer {
-	type Desc = UploadBufferDesc;
-	type Handle = UploadBufferHandle;
-
-	fn handle(&self) -> Self::Handle {
-		UploadBufferHandle {
-			buffer: self.inner,
-			data: unsafe {
-				NonNull::new_unchecked(std::ptr::slice_from_raw_parts_mut(
-					self.alloc.mapped_ptr().unwrap().as_ptr() as _,
-					self.alloc.size() as _,
-				))
-			},
-			id: self.id,
-		}
-	}
-
-	fn create(device: &Device, desc: Self::Desc) -> Result<Self> {
-		let info = BufferCreateInfo::builder()
-			.size(desc.size as u64)
-			.usage(match desc.usage {
-				UploadBufferUsage::Shader => BufferUsageFlags::STORAGE_BUFFER,
-				UploadBufferUsage::Index => BufferUsageFlags::INDEX_BUFFER,
-				UploadBufferUsage::Copy => BufferUsageFlags::TRANSFER_SRC,
-				UploadBufferUsage::Indirect => BufferUsageFlags::INDIRECT_BUFFER,
-			})
-			.sharing_mode(SharingMode::CONCURRENT);
-
-		let usage = info.usage;
-		let buffer = unsafe {
-			match device.queue_families() {
-				Queues::Single(q) => device.device().create_buffer(&info.queue_family_indices(&[q]), None),
-				Queues::Separate {
-					graphics,
-					compute,
-					transfer,
-				} => device
-					.device()
-					.create_buffer(&info.queue_family_indices(&[graphics, compute, transfer]), None),
-			}
-		}?;
-
-		let id = usage
-			.contains(BufferUsageFlags::STORAGE_BUFFER)
-			.then(|| device.base_descriptors().get_buffer(device.device(), buffer));
-
-		let requirements = unsafe { device.device().get_buffer_memory_requirements(buffer) };
-		let alloc = device
-			.allocator()
-			.allocate(&AllocationCreateDesc {
-				name: "CPU to GPU Graph Buffer",
-				requirements,
-				location: MemoryLocation::CpuToGpu,
-				linear: true,
-			})
-			.map_err(|e| Error::Message(e.to_string()))?;
-
-		Ok(Self {
-			inner: buffer,
-			alloc,
-			id,
-		})
-	}
-
-	unsafe fn destroy(&mut self, device: &Device) {
-		if let Some(id) = self.id {
-			device.base_descriptors().return_buffer(id);
-		}
-
-		let _ = device.allocator().free(std::mem::take(&mut self.alloc));
-		device.device().destroy_buffer(self.inner, None);
-	}
-}
-
-#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
-pub struct GpuBufferHandle {
-	pub buffer: ash::vk::Buffer,
-	pub id: Option<BufferId>,
-}
-
-#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
-pub struct GpuBufferDesc {
+pub struct BufferDesc {
 	pub size: usize,
 	pub usage: BufferUsageFlags,
 }
 
-pub struct GpuBuffer {
+#[derive(Default)]
+struct Buffer {
 	inner: ash::vk::Buffer,
 	alloc: Allocation,
 	id: Option<BufferId>,
 }
 
-impl Resource for GpuBuffer {
-	type Desc = GpuBufferDesc;
-	type Handle = GpuBufferHandle;
-
-	fn handle(&self) -> Self::Handle {
-		GpuBufferHandle {
-			buffer: self.inner,
-			id: self.id,
-		}
-	}
-
-	fn create(device: &Device, desc: Self::Desc) -> Result<Self> {
+impl Buffer {
+	fn create(device: &Device, desc: BufferDesc, location: MemoryLocation) -> Result<Self> {
 		let info = BufferCreateInfo::builder()
 			.size(desc.size as u64)
 			.usage(desc.usage)
@@ -203,13 +85,12 @@ impl Resource for GpuBuffer {
 			.contains(BufferUsageFlags::STORAGE_BUFFER)
 			.then(|| device.base_descriptors().get_buffer(device.device(), buffer));
 
-		let requirements = unsafe { device.device().get_buffer_memory_requirements(buffer) };
 		let alloc = device
 			.allocator()
 			.allocate(&AllocationCreateDesc {
-				name: "CPU to GPU Graph Buffer",
-				requirements,
-				location: MemoryLocation::CpuToGpu,
+				name: "Graph Buffer",
+				requirements: unsafe { device.device().get_buffer_memory_requirements(buffer) },
+				location,
 				linear: true,
 			})
 			.map_err(|e| Error::Message(e.to_string()))?;
@@ -221,27 +102,87 @@ impl Resource for GpuBuffer {
 		})
 	}
 
-	unsafe fn destroy(&mut self, device: &Device) {
+	unsafe fn destroy(self, device: &Device) {
 		if let Some(id) = self.id {
 			device.base_descriptors().return_buffer(id);
 		}
 
-		let _ = device.allocator().free(std::mem::take(&mut self.alloc));
+		let _ = device.allocator().free(self.alloc);
 		device.device().destroy_buffer(self.inner, None);
 	}
 }
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
-pub enum ImageFlags {
-	None,
-	Cube,
-	Array,
-	CubeAndArray,
+pub struct UploadBufferHandle {
+	pub buffer: ash::vk::Buffer,
+	pub id: Option<BufferId>,
+	pub data: NonNull<[u8]>,
+}
+
+#[derive(Default)]
+pub struct UploadBuffer {
+	inner: Buffer,
+}
+
+impl Resource for UploadBuffer {
+	type Desc = BufferDesc;
+	type Handle = UploadBufferHandle;
+
+	fn handle(&self) -> Self::Handle {
+		UploadBufferHandle {
+			buffer: self.inner.inner,
+			data: unsafe {
+				NonNull::new_unchecked(std::ptr::slice_from_raw_parts_mut(
+					self.inner.alloc.mapped_ptr().unwrap().as_ptr() as _,
+					self.inner.alloc.size() as _,
+				))
+			},
+			id: self.inner.id,
+		}
+	}
+
+	fn create(device: &Device, desc: Self::Desc) -> Result<Self>
+	where
+		Self: Sized,
+	{
+		Buffer::create(device, desc, MemoryLocation::CpuToGpu).map(|inner| Self { inner })
+	}
+
+	unsafe fn destroy(self, device: &Device) { self.inner.destroy(device) }
+}
+
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
+pub struct GpuBufferHandle {
+	pub buffer: ash::vk::Buffer,
+	pub id: Option<BufferId>,
+}
+
+#[derive(Default)]
+pub struct GpuBuffer {
+	inner: Buffer,
+}
+
+impl Resource for GpuBuffer {
+	type Desc = BufferDesc;
+	type Handle = GpuBufferHandle;
+
+	fn handle(&self) -> Self::Handle {
+		GpuBufferHandle {
+			buffer: self.inner.inner,
+			id: self.inner.id,
+		}
+	}
+
+	fn create(device: &Device, desc: Self::Desc) -> Result<Self> {
+		Buffer::create(device, desc, MemoryLocation::GpuOnly).map(|inner| Self { inner })
+	}
+
+	unsafe fn destroy(self, device: &Device) { self.inner.destroy(device) }
 }
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageDesc {
-	pub flags: ImageFlags,
+	pub flags: ImageCreateFlags,
 	pub format: Format,
 	pub size: Extent3D,
 	pub levels: u32,
@@ -250,6 +191,7 @@ pub struct ImageDesc {
 	pub usage: ImageUsageFlags,
 }
 
+#[derive(Default)]
 pub struct Image {
 	inner: ash::vk::Image,
 	alloc: Allocation,
@@ -265,14 +207,7 @@ impl Resource for Image {
 		let image = unsafe {
 			device.device().create_image(
 				&ImageCreateInfo::builder()
-					.flags(match desc.flags {
-						ImageFlags::None => ImageCreateFlags::empty(),
-						ImageFlags::Cube => ImageCreateFlags::CUBE_COMPATIBLE,
-						ImageFlags::Array => ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE,
-						ImageFlags::CubeAndArray => {
-							ImageCreateFlags::CUBE_COMPATIBLE | ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE
-						},
-					})
+					.flags(desc.flags)
 					.image_type(if desc.size.depth > 1 {
 						ImageType::TYPE_3D
 					} else if desc.size.height > 1 {
@@ -295,18 +230,18 @@ impl Resource for Image {
 		let alloc = device
 			.allocator()
 			.allocate(&AllocationCreateDesc {
-				name: "CPU to GPU Graph Image",
+				name: "Graph Image",
 				requirements: unsafe { device.device().get_image_memory_requirements(image) },
-				location: MemoryLocation::CpuToGpu,
-				linear: true,
+				location: MemoryLocation::GpuOnly,
+				linear: false,
 			})
 			.map_err(|e| Error::Message(e.to_string()))?;
 
 		Ok(Self { inner: image, alloc })
 	}
 
-	unsafe fn destroy(&mut self, device: &Device) {
-		let _ = device.allocator().free(std::mem::take(&mut self.alloc));
+	unsafe fn destroy(self, device: &Device) {
+		let _ = device.allocator().free(self.alloc);
 		device.device().destroy_image(self.inner, None);
 	}
 }
@@ -327,7 +262,7 @@ pub struct ImageViewDesc {
 	pub usage: ImageViewUsage,
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
+#[derive(Default, Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageView {
 	pub inner: ash::vk::ImageView,
 	pub id: Option<ImageId>,
@@ -354,15 +289,7 @@ impl Resource for ImageView {
 						a: ComponentSwizzle::IDENTITY,
 					})
 					.subresource_range(ImageSubresourceRange {
-						aspect_mask: match desc.format {
-							Format::D16_UNORM
-							| Format::D32_SFLOAT
-							| Format::D16_UNORM_S8_UINT
-							| Format::D24_UNORM_S8_UINT
-							| Format::D32_SFLOAT_S8_UINT => ImageAspectFlags::DEPTH,
-							Format::S8_UINT => ImageAspectFlags::STENCIL,
-							_ => ImageAspectFlags::COLOR,
-						},
+						aspect_mask: image_aspect_mask(desc.format),
 						base_mip_level: 0,
 						level_count: REMAINING_MIP_LEVELS,
 						base_array_layer: 0,
@@ -370,14 +297,7 @@ impl Resource for ImageView {
 					}),
 				None,
 			)?;
-			let layout = match desc.format {
-				Format::D16_UNORM
-				| Format::D32_SFLOAT
-				| Format::D16_UNORM_S8_UINT
-				| Format::D24_UNORM_S8_UINT
-				| Format::D32_SFLOAT_S8_UINT => ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
-				_ => ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-			};
+			let layout = sampled_image_layout(desc.format);
 			let (id, storage_id) = match desc.usage {
 				ImageViewUsage::None => (None, None),
 				ImageViewUsage::Sampled => (
@@ -402,7 +322,7 @@ impl Resource for ImageView {
 		}
 	}
 
-	unsafe fn destroy(&mut self, device: &Device) {
+	unsafe fn destroy(self, device: &Device) {
 		unsafe {
 			if let Some(id) = self.id {
 				device.base_descriptors().return_image(id);
@@ -412,5 +332,28 @@ impl Resource for ImageView {
 			}
 			device.device().destroy_image_view(self.inner, None);
 		}
+	}
+}
+
+pub fn image_aspect_mask(format: Format) -> ImageAspectFlags {
+	match format {
+		Format::D16_UNORM
+		| Format::D32_SFLOAT
+		| Format::D16_UNORM_S8_UINT
+		| Format::D24_UNORM_S8_UINT
+		| Format::D32_SFLOAT_S8_UINT => ImageAspectFlags::DEPTH | ImageAspectFlags::STENCIL,
+		Format::S8_UINT => ImageAspectFlags::STENCIL,
+		_ => ImageAspectFlags::COLOR,
+	}
+}
+
+pub fn sampled_image_layout(format: Format) -> ImageLayout {
+	match format {
+		Format::D16_UNORM | Format::X8_D24_UNORM_PACK32 | Format::D32_SFLOAT => ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+		Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT => {
+			ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		},
+		Format::S8_UINT => ImageLayout::STENCIL_READ_ONLY_OPTIMAL,
+		_ => ImageLayout::SHADER_READ_ONLY_OPTIMAL,
 	}
 }

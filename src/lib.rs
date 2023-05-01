@@ -1,4 +1,5 @@
 #![feature(allocator_api)]
+#![feature(btreemap_alloc)]
 #![feature(ptr_metadata)]
 #![feature(strict_provenance)]
 
@@ -9,6 +10,7 @@ pub use ash;
 pub mod arena;
 pub mod device;
 pub mod graph;
+pub mod resource;
 
 #[derive(Clone)]
 pub enum Error {
