@@ -40,8 +40,6 @@ use crate::{
 pub mod cache;
 mod compile;
 mod frame_data;
-#[cfg(test)]
-mod test;
 mod virtual_resource;
 
 const FRAMES_IN_FLIGHT: usize = 2;

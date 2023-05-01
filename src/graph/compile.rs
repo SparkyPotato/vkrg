@@ -677,7 +677,7 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 		.collect_in(self.resource_map.arena());
 
 		for buffer in self.resource_map.buffers() {
-			let mut prev_access = Access::default();
+			let mut prev_access: Option<Access> = None;
 			for (pass, access) in MergeReads::new(buffer.usages.iter().map(|(&x, &y)| {
 				(
 					x,
@@ -687,14 +687,16 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 					},
 				)
 			})) {
-				let barrier = sync[pass as usize].barriers.entry(prev_access).or_default();
-				*barrier = barrier.merge(&access.usage).unwrap();
-				prev_access = access.usage;
+				if let Some(prev) = prev_access {
+					let barrier = sync[pass as usize].barriers.entry(prev).or_default();
+					*barrier = barrier.merge(&access.usage).unwrap();
+					prev_access = Some(access.usage);
+				}
 			}
 		}
 
 		for image in self.resource_map.images() {
-			let mut prev_access = ImageAccess::default();
+			let mut prev_access: Option<ImageAccess> = None;
 			for (pass, access) in MergeReads::new(image.usages.iter().map(|(&x, &y)| {
 				(
 					x,
@@ -704,24 +706,30 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 					},
 				)
 			})) {
-				let sync = &mut sync[pass as usize];
-				if prev_access.layout == access.usage.layout {
-					if let Some(barrier) = sync.barriers.get_mut(&prev_access.access) {
-						// If there's no layout transition and an existing memory barrier, merge ourselves with it.
-						*barrier = barrier.merge(&access.usage.access).unwrap();
-						prev_access.access = *barrier;
-						continue;
+				if let Some(prev) = prev_access {
+					let sync = &mut sync[pass as usize];
+					if prev.layout == access.usage.layout {
+						if let Some(barrier) = sync.barriers.get_mut(&prev.access) {
+							// If there's no layout transition and an existing memory barrier, merge ourselves with it.
+							*barrier = barrier.merge(&access.usage.access).unwrap();
+							prev_access = Some(ImageAccess {
+								access: *barrier,
+								layout: access.usage.layout,
+								format: access.usage.format,
+							});
+							continue;
+						}
 					}
-				}
 
-				sync.image_barriers.push(image_barrier(
-					image.handle,
-					prev_access,
-					access.usage,
-					access.usage.format,
-					access.write,
-				));
-				prev_access = access.usage;
+					sync.image_barriers.push(image_barrier(
+						image.handle,
+						prev,
+						access.usage,
+						access.usage.format,
+						access.write,
+					));
+					prev_access = Some(access.usage);
+				}
 			}
 		}
 

@@ -4,10 +4,10 @@ use std::{
 };
 
 use ash::{
-	Entry,
 	extensions::{ext::DebugUtils, khr::Surface},
-	Instance,
 	vk::{DebugUtilsMessengerEXT, Fence, PhysicalDevice, Queue, SubmitInfo2},
+	Entry,
+	Instance,
 };
 use gpu_allocator::vulkan::Allocator;
 
@@ -18,8 +18,6 @@ mod init;
 
 /// Has everything you need to do Vulkan stuff.
 pub struct Device {
-	entry: Entry,
-	instance: Instance,
 	debug_messenger: DebugUtilsMessengerEXT, // Can be null.
 	physical_device: PhysicalDevice,
 	device: ash::Device,
@@ -28,6 +26,8 @@ pub struct Device {
 	queues: Queues<QueueData>,
 	allocator: ManuallyDrop<Mutex<Allocator>>,
 	descriptors: Descriptors,
+	instance: Instance,
+	entry: Entry,
 }
 
 struct QueueData {
