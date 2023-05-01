@@ -6,6 +6,7 @@
 use std::fmt::{Debug, Display};
 
 pub use ash;
+pub use gpu_allocator;
 
 pub mod arena;
 pub mod device;

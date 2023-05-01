@@ -22,7 +22,11 @@ use crate::{
 	graph::{
 		virtual_resource::{
 			compatible_formats,
+			Access,
 			BufferUsage,
+			GpuBufferType,
+			GpuData,
+			ImageType,
 			ImageUsageType,
 			ResourceLifetime,
 			VirtualResourceData,
@@ -72,8 +76,8 @@ pub struct GpuResource<'graph, H, U> {
 pub enum Resource<'graph> {
 	Data(NonNull<()>, DataState),
 	UploadBuffer(UploadBufferHandle),
-	GpuBuffer(GpuResource<'graph, GpuBufferHandle, BufferUsage>),
-	Image(GpuResource<'graph, Image, ImageUsage>),
+	GpuBuffer(GpuResource<'graph, GpuBufferHandle, BufferUsage>, Option<Access>),
+	Image(GpuResource<'graph, Image, ImageUsage>, Option<ImageAccess>),
 }
 
 impl<'graph> Resource<'graph> {
@@ -91,16 +95,16 @@ impl<'graph> Resource<'graph> {
 		}
 	}
 
-	pub unsafe fn gpu_buffer(&self) -> &GpuResource<'graph, GpuBufferHandle, BufferUsage> {
+	pub unsafe fn gpu_buffer(&self) -> (&GpuResource<'graph, GpuBufferHandle, BufferUsage>, Option<Access>) {
 		match self {
-			Resource::GpuBuffer(res) => res,
+			Resource::GpuBuffer(res, prev) => (res, *prev),
 			_ => unreachable_unchecked(),
 		}
 	}
 
-	pub unsafe fn image(&self) -> &GpuResource<'graph, Image, ImageUsage> {
+	pub unsafe fn image(&self) -> (&GpuResource<'graph, Image, ImageUsage>, Option<ImageAccess>) {
 		match self {
-			Resource::Image(res) => res,
+			Resource::Image(res, prev) => (res, *prev),
 			_ => unreachable_unchecked(),
 		}
 	}
@@ -135,14 +139,14 @@ impl<'graph> ResourceMap<'graph> {
 
 	fn arena(&self) -> &'graph Arena { self.resources.allocator() }
 
-	fn buffers(&self) -> impl Iterator<Item = &GpuResource<'graph, GpuBufferHandle, BufferUsage>> {
+	fn buffers(&self) -> impl Iterator<Item = (&GpuResource<'graph, GpuBufferHandle, BufferUsage>, Option<Access>)> {
 		self.buffers.iter().map(move |&id| unsafe {
 			let res = self.resources.get_unchecked(id as usize);
 			res.gpu_buffer()
 		})
 	}
 
-	fn images(&self) -> impl Iterator<Item = &GpuResource<'graph, Image, ImageUsage>> {
+	fn images(&self) -> impl Iterator<Item = (&GpuResource<'graph, Image, ImageUsage>, Option<ImageAccess>)> {
 		self.images.iter().map(move |&id| unsafe {
 			let res = self.resources.get_unchecked(id as usize);
 			res.image()
@@ -182,6 +186,8 @@ enum ResourceDescType<'graph> {
 	UploadBuffer(BufferDesc),
 	GpuBuffer(GpuResource<'graph, BufferDesc, BufferUsage>),
 	Image(GpuResource<'graph, ImageDesc, ImageUsage>),
+	ExternalBuffer(GpuResource<'graph, GpuBufferHandle, BufferUsage>, Access),
+	ExternalImage(GpuResource<'graph, Image, ImageUsage>, ImageAccess),
 }
 
 impl<'graph> VirtualResourceType<'graph> {
@@ -198,46 +204,75 @@ impl<'graph> VirtualResourceType<'graph> {
 						a | b
 					}),
 			}),
-			VirtualResourceType::GpuBuffer(desc) => ResourceDescType::GpuBuffer(GpuResource {
+			VirtualResourceType::GpuBuffer(GpuData {
+				desc: GpuBufferType::Internal(size),
+				write_usage,
+				read_usages,
+			}) => ResourceDescType::GpuBuffer(GpuResource {
 				handle: BufferDesc {
-					size: desc.desc,
-					usage: desc
-						.read_usages
+					size,
+					usage: read_usages
 						.iter()
 						.map(|(_, &x)| x.into())
-						.fold(desc.write_usage.into(), |a: BufferUsageFlags, b: BufferUsageFlags| {
-							a | b
-						}),
+						.fold(write_usage.into(), |a: BufferUsageFlags, b: BufferUsageFlags| a | b),
 				},
 				usages: {
-					let arena = *desc.read_usages.allocator();
-					desc.read_usages
+					let arena = *read_usages.allocator();
+					read_usages
 						.into_iter()
 						.map(|(pass, usage)| (pass, Usage { write: false, usage }))
 						.chain(std::iter::once((
 							pass,
 							Usage {
 								write: true,
-								usage: desc.write_usage,
+								usage: write_usage,
 							},
 						)))
 						.collect_in(arena)
 				},
 			}),
-			VirtualResourceType::Image(desc) => {
-				let mut usages = BTreeMap::new_in(*desc.read_usages.allocator());
+			VirtualResourceType::GpuBuffer(GpuData {
+				desc: GpuBufferType::External(buf),
+				write_usage,
+				read_usages,
+			}) => ResourceDescType::ExternalBuffer(
+				GpuResource {
+					handle: buf.handle,
+					usages: {
+						let arena = *read_usages.allocator();
+						read_usages
+							.into_iter()
+							.map(|(pass, usage)| (pass, Usage { write: false, usage }))
+							.chain(std::iter::once((
+								pass,
+								Usage {
+									write: true,
+									usage: write_usage,
+								},
+							)))
+							.collect_in(arena)
+					},
+				},
+				buf.previous_access,
+			),
+			VirtualResourceType::Image(GpuData {
+				desc: ImageType::Internal(desc),
+				read_usages,
+				write_usage,
+			}) => {
+				let mut usages = BTreeMap::new_in(*read_usages.allocator());
 
-				let mut usage: ImageUsageFlags = desc.write_usage.usage.into();
-				let mut flags = desc.write_usage.create_flags();
+				let mut usage: ImageUsageFlags = write_usage.usage.into();
+				let mut flags = write_usage.create_flags();
 				usages.insert(
 					pass,
 					Usage {
 						write: true,
-						usage: desc.write_usage,
+						usage: write_usage,
 					},
 				);
 
-				for (&pass, &read) in desc.read_usages.iter() {
+				for (&pass, &read) in read_usages.iter() {
 					let r: ImageUsageFlags = read.usage.into();
 					usage |= r;
 					flags |= read.create_flags();
@@ -249,7 +284,7 @@ impl<'graph> VirtualResourceType<'graph> {
 						},
 					);
 
-					if read.format != desc.write_usage.format {
+					if read.format != write_usage.format {
 						flags |= ImageCreateFlags::MUTABLE_FORMAT;
 					}
 				}
@@ -257,15 +292,52 @@ impl<'graph> VirtualResourceType<'graph> {
 				ResourceDescType::Image(GpuResource {
 					handle: ImageDesc {
 						flags,
-						format: desc.write_usage.format,
-						size: desc.desc.size,
-						levels: desc.desc.levels,
-						layers: desc.desc.layers,
-						samples: desc.desc.samples,
+						format: write_usage.format,
+						size: desc.size,
+						levels: desc.levels,
+						layers: desc.layers,
+						samples: desc.samples,
 						usage,
 					},
 					usages,
 				})
+			},
+			VirtualResourceType::Image(GpuData {
+				desc: ImageType::External(img),
+				write_usage,
+				read_usages,
+			}) => {
+				let mut usages = BTreeMap::new_in(*read_usages.allocator());
+
+				usages.insert(
+					pass,
+					Usage {
+						write: true,
+						usage: write_usage,
+					},
+				);
+
+				for (&pass, &read) in read_usages.iter() {
+					usages.insert(
+						pass,
+						Usage {
+							write: false,
+							usage: read,
+						},
+					);
+				}
+
+				ResourceDescType::ExternalImage(
+					GpuResource {
+						handle: img.handle,
+						usages,
+					},
+					ImageAccess {
+						access: img.previous_access.access,
+						layout: img.previous_access.layout,
+						format: write_usage.format,
+					},
+				)
 			},
 		}
 	}
@@ -308,22 +380,35 @@ impl<'a> ResourceDesc<'a> {
 			return false;
 		}
 
-		let ret = match &other.ty {
-			VirtualResourceType::Data(_) | VirtualResourceType::UploadBuffer(_) => unreachable_unchecked(),
-			VirtualResourceType::GpuBuffer(desc) => {
+		let ret = match other.ty {
+			VirtualResourceType::Data(_)
+			| VirtualResourceType::UploadBuffer(_)
+			| VirtualResourceType::GpuBuffer(GpuData {
+				desc: GpuBufferType::External(_),
+				..
+			})
+			| VirtualResourceType::Image(GpuData {
+				desc: ImageType::External(_),
+				..
+			}) => unreachable_unchecked(),
+			VirtualResourceType::GpuBuffer(GpuData {
+				desc: GpuBufferType::Internal(size),
+				write_usage,
+				ref read_usages,
+			}) => {
 				let this = self.ty.gpu_buffer();
-				this.handle.size = this.handle.size.max(desc.desc);
-				let u: BufferUsageFlags = desc.write_usage.into();
+				this.handle.size = this.handle.size.max(size);
+				let u: BufferUsageFlags = write_usage.into();
 				this.handle.usage |= u;
 				this.usages.insert(
 					other.lifetime.start,
 					Usage {
 						write: true,
-						usage: desc.write_usage,
+						usage: write_usage,
 					},
 				);
 
-				for (&pass, &read) in desc.read_usages.iter() {
+				for (&pass, &read) in read_usages.iter() {
 					let r: BufferUsageFlags = read.into();
 					this.handle.usage |= r;
 					this.usages.insert(
@@ -337,24 +422,29 @@ impl<'a> ResourceDesc<'a> {
 
 				true
 			},
-			VirtualResourceType::Image(desc) => {
+
+			VirtualResourceType::Image(GpuData {
+				desc: ImageType::Internal(_),
+				write_usage,
+				ref read_usages,
+			}) => {
 				let this = self.ty.image();
-				if !compatible_formats(this.handle.format, desc.write_usage.format) {
+				if !compatible_formats(this.handle.format, write_usage.format) {
 					return false;
 				}
 
-				let u: ImageUsageFlags = desc.write_usage.usage.into();
+				let u: ImageUsageFlags = write_usage.usage.into();
 				this.handle.usage |= u;
-				this.handle.flags |= desc.write_usage.create_flags();
+				this.handle.flags |= write_usage.create_flags();
 				this.usages.insert(
 					other.lifetime.start,
 					Usage {
 						write: true,
-						usage: desc.write_usage,
+						usage: write_usage,
 					},
 				);
 
-				for (&pass, &read) in desc.read_usages.iter() {
+				for (&pass, &read) in read_usages.iter() {
 					let r: ImageUsageFlags = read.usage.into();
 					this.handle.usage |= r;
 					this.handle.flags |= read.create_flags();
@@ -417,10 +507,25 @@ impl<'graph> ResourceAliaser<'graph> {
 	}
 
 	fn add(&mut self, resource: VirtualResourceData<'graph>) {
-		match &resource.ty {
-			VirtualResourceType::Data(_) | VirtualResourceType::UploadBuffer(_) => self.push(resource.into()),
-			VirtualResourceType::GpuBuffer(_) => unsafe { self.merge(MergeCandidate::GpuBuffer, resource) },
-			VirtualResourceType::Image(desc) => unsafe { self.merge(MergeCandidate::Image(desc.desc), resource) },
+		match resource.ty {
+			VirtualResourceType::Data(_)
+			| VirtualResourceType::UploadBuffer(_)
+			| VirtualResourceType::GpuBuffer(GpuData {
+				desc: GpuBufferType::External(_),
+				..
+			})
+			| VirtualResourceType::Image(GpuData {
+				desc: ImageType::External(_),
+				..
+			}) => self.push(resource.into()),
+			VirtualResourceType::GpuBuffer(GpuData {
+				desc: GpuBufferType::Internal(_),
+				..
+			}) => unsafe { self.merge(MergeCandidate::GpuBuffer, resource) },
+			VirtualResourceType::Image(GpuData {
+				desc: ImageType::Internal(desc),
+				..
+			}) => unsafe { self.merge(MergeCandidate::Image(desc), resource) },
 		}
 	}
 
@@ -438,25 +543,51 @@ impl<'graph> ResourceAliaser<'graph> {
 			),
 			ResourceDescType::GpuBuffer(desc) => {
 				buffers.push(i as _);
-				Resource::GpuBuffer(GpuResource {
-					handle: graph
-						.caches
-						.gpu_buffers
-						.get(device, desc.handle)
-						.expect("failed to allocate gpu buffer"),
-					usages: desc.usages,
-				})
+				Resource::GpuBuffer(
+					GpuResource {
+						handle: graph
+							.caches
+							.gpu_buffers
+							.get(device, desc.handle)
+							.expect("failed to allocate gpu buffer"),
+						usages: desc.usages,
+					},
+					None,
+				)
+			},
+			ResourceDescType::ExternalBuffer(desc, prev) => {
+				buffers.push(i as _);
+				Resource::GpuBuffer(
+					GpuResource {
+						handle: desc.handle,
+						usages: desc.usages,
+					},
+					Some(prev),
+				)
 			},
 			ResourceDescType::Image(desc) => {
 				images.push(i as _);
-				Resource::Image(GpuResource {
-					handle: graph
-						.caches
-						.images
-						.get(device, desc.handle)
-						.expect("failed to allocate image"),
-					usages: desc.usages,
-				})
+				Resource::Image(
+					GpuResource {
+						handle: graph
+							.caches
+							.images
+							.get(device, desc.handle)
+							.expect("failed to allocate image"),
+						usages: desc.usages,
+					},
+					None,
+				)
+			},
+			ResourceDescType::ExternalImage(desc, prev) => {
+				images.push(i as _);
+				Resource::Image(
+					GpuResource {
+						handle: desc.handle,
+						usages: desc.usages,
+					},
+					Some(prev),
+				)
 			},
 		});
 
@@ -466,12 +597,6 @@ impl<'graph> ResourceAliaser<'graph> {
 
 trait AccessExt: Sized {
 	fn merge(&self, other: &Self) -> Option<Self>;
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Default)]
-pub struct Access {
-	pub stage: PipelineStageFlags2,
-	pub access: AccessFlags2,
 }
 
 impl AccessExt for Access {
@@ -484,7 +609,7 @@ impl AccessExt for Access {
 }
 
 #[derive(Copy, Clone, Default)]
-struct ImageAccess {
+pub struct ImageAccess {
 	pub access: Access,
 	pub layout: ImageLayout,
 	pub format: Format,
@@ -676,8 +801,7 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 		.take(self.passes.len())
 		.collect_in(self.resource_map.arena());
 
-		for buffer in self.resource_map.buffers() {
-			let mut prev_access: Option<Access> = None;
+		for (buffer, mut prev_access) in self.resource_map.buffers() {
 			for (pass, access) in MergeReads::new(buffer.usages.iter().map(|(&x, &y)| {
 				(
 					x,
@@ -695,8 +819,7 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 			}
 		}
 
-		for image in self.resource_map.images() {
-			let mut prev_access: Option<ImageAccess> = None;
+		for (image, mut prev_access) in self.resource_map.images() {
 			for (pass, access) in MergeReads::new(image.usages.iter().map(|(&x, &y)| {
 				(
 					x,

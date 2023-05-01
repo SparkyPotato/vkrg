@@ -1,3 +1,5 @@
+//! The render graph.
+
 use std::{
 	alloc::{Allocator, Layout},
 	hash::BuildHasherDefault,
@@ -17,7 +19,19 @@ use hashbrown::HashMap;
 use rustc_hash::FxHasher;
 use tracing::{span, Level};
 
-pub use crate::graph::virtual_resource::{GpuBufferDesc, ImageDesc, ImageUsage};
+pub use crate::graph::virtual_resource::{
+	Access,
+	BufferUsage,
+	ExternalBuffer,
+	ExternalImage,
+	GpuBufferDesc,
+	ImageAccess,
+	ImageDesc,
+	ImageUsage,
+	ImageUsageType,
+	Shader,
+	UploadBufferDesc,
+};
 use crate::{
 	arena::{Arena, IteratorAlloc},
 	device::Device,
@@ -37,7 +51,7 @@ use crate::{
 	Result,
 };
 
-pub mod cache;
+mod cache;
 mod compile;
 mod frame_data;
 mod virtual_resource;
@@ -52,6 +66,7 @@ pub struct RenderGraph {
 	resource_base_id: usize,
 }
 
+#[doc(hidden)]
 pub struct Caches {
 	upload_buffers: [ResourceCache<UploadBuffer>; FRAMES_IN_FLIGHT],
 	gpu_buffers: ResourceCache<GpuBuffer>,
@@ -105,6 +120,7 @@ impl RenderGraph {
 	}
 }
 
+/// A frame being recorded to run in the render graph.
 pub struct Frame<'pass, 'graph> {
 	graph: &'graph mut RenderGraph,
 	arena: &'graph Arena,
@@ -113,6 +129,7 @@ pub struct Frame<'pass, 'graph> {
 }
 
 impl<'pass, 'graph> Frame<'pass, 'graph> {
+	/// Build a pass with a name.
 	pub fn pass(&mut self, name: &str) -> PassBuilder<'_, 'pass, 'graph> {
 		let arena = self.arena;
 		let name = name.as_bytes().iter().copied().chain([0]);
@@ -122,6 +139,7 @@ impl<'pass, 'graph> Frame<'pass, 'graph> {
 		}
 	}
 
+	/// Run the frame.
 	pub fn run(self, device: &Device) -> Result<()> {
 		let arena = self.arena;
 		let data = &mut self.graph.frame_data[self.graph.curr_frame];
@@ -202,6 +220,7 @@ impl<'pass, 'graph> Frame<'pass, 'graph> {
 	}
 }
 
+/// A builder for a pass.
 pub struct PassBuilder<'frame, 'pass, 'graph> {
 	name: Vec<u8, &'graph Arena>,
 	frame: &'frame mut Frame<'pass, 'graph>,
@@ -209,19 +228,19 @@ pub struct PassBuilder<'frame, 'pass, 'graph> {
 
 impl<'frame, 'pass, 'graph> PassBuilder<'frame, 'pass, 'graph> {
 	/// Read GPU data that another pass outputs.
-	pub fn input<T: VirtualResource>(&mut self, id: ReadId<T>, usage: <T::Desc as VirtualResourceDesc>::Usage) {
+	pub fn input<T: VirtualResource>(&mut self, id: ReadId<T>, usage: T::Usage) {
 		let id = id.id.wrapping_sub(self.frame.graph.resource_base_id);
 
 		unsafe {
 			let res = self.frame.virtual_resources.get_unchecked_mut(id);
 			res.lifetime.end = self.frame.passes.len() as _;
-			T::Desc::add_read_usage(res, self.frame.passes.len() as _, usage);
+			T::add_read_usage(res, self.frame.passes.len() as _, usage);
 		}
 	}
 
 	/// Output GPU data for other passes.
 	pub fn output<D: VirtualResourceDesc>(
-		&mut self, desc: D, usage: D::Usage,
+		&mut self, desc: D, usage: <D::Resource as VirtualResource>::Usage,
 	) -> (ReadId<D::Resource>, WriteId<D::Resource>) {
 		let real_id = self.frame.virtual_resources.len();
 		let id = real_id.wrapping_add(self.frame.graph.resource_base_id);
@@ -273,6 +292,7 @@ impl<'frame, 'pass, 'graph> PassBuilder<'frame, 'pass, 'graph> {
 		)
 	}
 
+	/// Build the pass with the given callback.
 	pub fn build(self, callback: impl FnOnce(PassContext) + 'pass) {
 		let pass = PassData {
 			name: self.name,
@@ -282,6 +302,7 @@ impl<'frame, 'pass, 'graph> PassBuilder<'frame, 'pass, 'graph> {
 	}
 }
 
+/// Context given to the callback for every pass.
 pub struct PassContext<'frame, 'graph> {
 	pub arena: &'graph Arena,
 	pub device: &'frame Device,
@@ -293,6 +314,7 @@ pub struct PassContext<'frame, 'graph> {
 }
 
 impl<'frame, 'graph> PassContext<'frame, 'graph> {
+	/// Get a reference to transient CPU-side data output by another pass.
 	pub fn get_data_ref<T: 'frame>(&mut self, id: RefId<T>) -> &'frame T {
 		let id = id.id.wrapping_sub(self.base_id);
 		unsafe {
@@ -307,6 +329,7 @@ impl<'frame, 'graph> PassContext<'frame, 'graph> {
 		}
 	}
 
+	/// Get owned transient CPU-side data output by another pass.
 	pub fn get_data<T: 'frame>(&mut self, id: GetId<T>) -> T {
 		let id = id.id.wrapping_sub(self.base_id);
 		unsafe {
@@ -323,6 +346,7 @@ impl<'frame, 'graph> PassContext<'frame, 'graph> {
 		}
 	}
 
+	/// Set transient CPU-side data as an output of this pass.
 	pub fn set_data<T: 'frame>(&mut self, id: SetId<T>, data: T) {
 		let id = id.id.wrapping_sub(self.base_id);
 		unsafe {
@@ -339,6 +363,7 @@ impl<'frame, 'graph> PassContext<'frame, 'graph> {
 		}
 	}
 
+	/// Read a GPU resource output by another pass.
 	pub fn read<T: VirtualResource>(&mut self, id: ReadId<T>) -> T {
 		let id = id.id.wrapping_sub(self.base_id);
 		unsafe {
@@ -347,6 +372,7 @@ impl<'frame, 'graph> PassContext<'frame, 'graph> {
 		}
 	}
 
+	/// Write a GPU resource as an output of this pass.
 	pub fn write<T: VirtualResource>(&mut self, id: WriteId<T>) -> T {
 		let id = id.id.wrapping_sub(self.base_id);
 		unsafe {
@@ -356,11 +382,13 @@ impl<'frame, 'graph> PassContext<'frame, 'graph> {
 	}
 }
 
+/// An ID to write CPU-side data.
 pub struct SetId<T> {
 	id: usize,
 	_marker: PhantomData<T>,
 }
 
+/// An ID to read CPU-side data.
 pub struct GetId<T> {
 	id: usize,
 	_marker: PhantomData<T>,
@@ -372,6 +400,7 @@ impl<T: Copy> Clone for GetId<T> {
 }
 
 impl<T> GetId<T> {
+	/// Convert this to a reference ID.
 	pub fn to_ref(self) -> RefId<T> {
 		RefId {
 			id: self.id,
@@ -380,6 +409,7 @@ impl<T> GetId<T> {
 	}
 }
 
+/// An ID to read CPU-side data as references.
 pub struct RefId<T> {
 	id: usize,
 	_marker: PhantomData<T>,
@@ -394,11 +424,13 @@ impl<'frame, T> From<GetId<T>> for RefId<T> {
 	fn from(id: GetId<T>) -> Self { id.to_ref() }
 }
 
+/// An ID to write GPU resources.
 pub struct WriteId<T: VirtualResource> {
 	id: usize,
 	_marker: PhantomData<T>,
 }
 
+/// An ID to read GPU resources.
 pub struct ReadId<T: VirtualResource> {
 	id: usize,
 	_marker: PhantomData<T>,

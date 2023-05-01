@@ -1,10 +1,12 @@
 use std::{hash::BuildHasherDefault, hint::unreachable_unchecked, ptr::NonNull};
 
 use ash::vk::{
+	AccessFlags2,
 	BufferUsageFlags,
 	Extent3D,
 	Format,
 	ImageCreateFlags,
+	ImageLayout,
 	ImageUsageFlags,
 	ImageViewType,
 	PipelineStageFlags2,
@@ -18,6 +20,7 @@ use crate::{
 	resource::{GpuBufferHandle, ImageView, ImageViewDesc, ImageViewUsage, UploadBufferHandle},
 };
 
+/// The usage of a buffer.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum BufferUsage {
 	TransferSrc,
@@ -41,16 +44,25 @@ impl From<BufferUsage> for BufferUsageFlags {
 	}
 }
 
+/// A description for a buffer for uploading data from the CPU to the GPU.
+///
+/// Has a corresponding usage of [`BufferUsage`].
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct UploadBufferDesc {
 	pub size: usize,
 }
 
+/// A description for a GPU buffer.
+///
+/// Has a corresponding usage of [`BufferUsage`].
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct GpuBufferDesc {
 	pub size: usize,
 }
 
+/// A description for an image.
+///
+/// Has a corresponding usage of [`ImageUsage`].
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageDesc {
 	pub size: Extent3D,
@@ -59,6 +71,7 @@ pub struct ImageDesc {
 	pub samples: SampleCountFlags,
 }
 
+/// A shader stage
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum Shader {
 	Vertex,
@@ -82,6 +95,7 @@ impl From<Shader> for PipelineStageFlags2 {
 	}
 }
 
+/// The type of usage of an image.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum ImageUsageType {
 	TransferSrc,
@@ -105,6 +119,7 @@ impl From<ImageUsageType> for ImageUsageFlags {
 	}
 }
 
+/// The usage of an image.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageUsage {
 	pub format: Format,
@@ -120,6 +135,38 @@ impl ImageUsage {
 			_ => ImageCreateFlags::empty(),
 		}
 	}
+}
+
+/// The previous access of an external buffer to be synchronized against.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Default, Debug)]
+pub struct Access {
+	pub stage: PipelineStageFlags2,
+	pub access: AccessFlags2,
+}
+
+/// A buffer external to the render graph.
+///
+/// Has a corresponding usage of [`BufferUsage`].
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
+pub struct ExternalBuffer {
+	pub handle: GpuBufferHandle,
+	pub previous_access: Access,
+}
+
+/// The previous access of an external image to be synchronized against.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Default, Debug)]
+pub struct ImageAccess {
+	pub access: Access,
+	pub layout: ImageLayout,
+}
+
+/// An image external to the render graph.
+///
+/// Has a corresponding usage of [`ImageUsage`].
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
+pub struct ExternalImage {
+	pub handle: ash::vk::Image,
+	pub previous_access: ImageAccess,
 }
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
@@ -148,17 +195,16 @@ pub struct VirtualResourceData<'graph> {
 
 pub trait VirtualResourceDesc {
 	type Resource: VirtualResource;
-	type Usage;
 
-	fn ty(self, write_usage: Self::Usage, arena: &Arena) -> VirtualResourceType;
-
-	unsafe fn add_read_usage(ty: &mut VirtualResourceData, pass: u32, usage: Self::Usage);
+	fn ty(self, write_usage: <Self::Resource as VirtualResource>::Usage, arena: &Arena) -> VirtualResourceType;
 }
 
 pub trait VirtualResource {
-	type Desc: VirtualResourceDesc;
+	type Usage;
 
 	unsafe fn from_res(pass: u32, res: &Resource, caches: &mut Caches, device: &Device) -> Self;
+
+	unsafe fn add_read_usage(ty: &mut VirtualResourceData, pass: u32, usage: Self::Usage);
 }
 
 pub struct GpuData<'graph, T, U> {
@@ -167,11 +213,21 @@ pub struct GpuData<'graph, T, U> {
 	pub read_usages: ArenaMap<'graph, u32, U>,
 }
 
+pub enum GpuBufferType {
+	Internal(usize),
+	External(ExternalBuffer),
+}
+
+pub enum ImageType {
+	Internal(ImageDesc),
+	External(ExternalImage),
+}
+
 pub enum VirtualResourceType<'graph> {
 	Data(NonNull<()>),
 	UploadBuffer(GpuData<'graph, usize, BufferUsage>),
-	GpuBuffer(GpuData<'graph, usize, BufferUsage>),
-	Image(GpuData<'graph, ImageDesc, ImageUsage>),
+	GpuBuffer(GpuData<'graph, GpuBufferType, BufferUsage>),
+	Image(GpuData<'graph, ImageType, ImageUsage>),
 }
 
 impl<'graph> VirtualResourceType<'graph> {
@@ -182,14 +238,14 @@ impl<'graph> VirtualResourceType<'graph> {
 		}
 	}
 
-	unsafe fn gpu_buffer(&mut self) -> &mut GpuData<'graph, usize, BufferUsage> {
+	unsafe fn gpu_buffer(&mut self) -> &mut GpuData<'graph, GpuBufferType, BufferUsage> {
 		match self {
 			VirtualResourceType::GpuBuffer(data) => data,
 			_ => unreachable_unchecked(),
 		}
 	}
 
-	unsafe fn image(&mut self) -> &mut GpuData<'graph, ImageDesc, ImageUsage> {
+	unsafe fn image(&mut self) -> &mut GpuData<'graph, ImageType, ImageUsage> {
 		match self {
 			VirtualResourceType::Image(data) => data,
 			_ => unreachable_unchecked(),
@@ -197,9 +253,18 @@ impl<'graph> VirtualResourceType<'graph> {
 	}
 }
 
+impl VirtualResource for UploadBufferHandle {
+	type Usage = BufferUsage;
+
+	unsafe fn from_res(_: u32, res: &Resource, _: &mut Caches, _: &Device) -> Self { res.upload_buffer() }
+
+	unsafe fn add_read_usage(res: &mut VirtualResourceData, pass: u32, usage: Self::Usage) {
+		res.ty.upload_buffer().read_usages.insert(pass, usage);
+	}
+}
+
 impl VirtualResourceDesc for UploadBufferDesc {
 	type Resource = UploadBufferHandle;
-	type Usage = BufferUsage;
 
 	fn ty(self, write_usage: BufferUsage, arena: &Arena) -> VirtualResourceType {
 		VirtualResourceType::UploadBuffer(GpuData {
@@ -208,70 +273,35 @@ impl VirtualResourceDesc for UploadBufferDesc {
 			read_usages: ArenaMap::with_hasher_in(BuildHasherDefault::default(), arena),
 		})
 	}
-
-	unsafe fn add_read_usage(res: &mut VirtualResourceData, pass: u32, usage: Self::Usage) {
-		res.ty.upload_buffer().read_usages.insert(pass, usage);
-	}
 }
 
-impl VirtualResource for UploadBufferHandle {
-	type Desc = UploadBufferDesc;
-
-	unsafe fn from_res(_: u32, res: &Resource, _: &mut Caches, _: &Device) -> Self { res.upload_buffer() }
-}
-
-impl VirtualResourceDesc for GpuBufferDesc {
-	type Resource = GpuBufferHandle;
+impl VirtualResource for GpuBufferHandle {
 	type Usage = BufferUsage;
 
-	fn ty(self, write_usage: BufferUsage, arena: &Arena) -> VirtualResourceType {
-		VirtualResourceType::GpuBuffer(GpuData {
-			desc: self.size,
-			write_usage,
-			read_usages: ArenaMap::with_hasher_in(BuildHasherDefault::default(), arena),
-		})
-	}
+	unsafe fn from_res(_: u32, res: &Resource, _: &mut Caches, _: &Device) -> Self { res.gpu_buffer().0.handle }
 
 	unsafe fn add_read_usage(res: &mut VirtualResourceData, pass: u32, usage: Self::Usage) {
 		res.ty.gpu_buffer().read_usages.insert(pass, usage);
 	}
 }
 
-impl VirtualResource for GpuBufferHandle {
-	type Desc = GpuBufferDesc;
+impl VirtualResourceDesc for GpuBufferDesc {
+	type Resource = GpuBufferHandle;
 
-	unsafe fn from_res(_: u32, res: &Resource, _: &mut Caches, _: &Device) -> Self { res.gpu_buffer().handle }
-}
-
-impl VirtualResourceDesc for ImageDesc {
-	type Resource = ImageView;
-	type Usage = ImageUsage;
-
-	fn ty(self, usage: ImageUsage, arena: &Arena) -> VirtualResourceType {
-		VirtualResourceType::Image(GpuData {
-			desc: self,
-			write_usage: usage,
+	fn ty(self, write_usage: BufferUsage, arena: &Arena) -> VirtualResourceType {
+		VirtualResourceType::GpuBuffer(GpuData {
+			desc: GpuBufferType::Internal(self.size),
+			write_usage,
 			read_usages: ArenaMap::with_hasher_in(BuildHasherDefault::default(), arena),
 		})
-	}
-
-	unsafe fn add_read_usage(res: &mut VirtualResourceData, pass: u32, usage: Self::Usage) {
-		let image = res.ty.image();
-		debug_assert!(
-			compatible_formats(image.write_usage.format, usage.format),
-			"`{:?}` and `{:?}` are not compatible",
-			image.write_usage.format,
-			usage.format
-		);
-		image.read_usages.insert(pass, usage);
 	}
 }
 
 impl VirtualResource for ImageView {
-	type Desc = ImageDesc;
+	type Usage = ImageUsage;
 
 	unsafe fn from_res(pass: u32, res: &Resource, caches: &mut Caches, device: &Device) -> Self {
-		let res = res.image();
+		let (res, _) = res.image();
 		let usage = res.usages[&pass].usage;
 
 		caches
@@ -290,6 +320,53 @@ impl VirtualResource for ImageView {
 				},
 			)
 			.expect("Failed to create image view")
+	}
+
+	unsafe fn add_read_usage(res: &mut VirtualResourceData, pass: u32, usage: Self::Usage) {
+		let image = res.ty.image();
+		debug_assert!(
+			compatible_formats(image.write_usage.format, usage.format),
+			"`{:?}` and `{:?}` are not compatible",
+			image.write_usage.format,
+			usage.format
+		);
+		image.read_usages.insert(pass, usage);
+	}
+}
+
+impl VirtualResourceDesc for ImageDesc {
+	type Resource = ImageView;
+
+	fn ty(self, usage: ImageUsage, arena: &Arena) -> VirtualResourceType {
+		VirtualResourceType::Image(GpuData {
+			desc: ImageType::Internal(self),
+			write_usage: usage,
+			read_usages: ArenaMap::with_hasher_in(BuildHasherDefault::default(), arena),
+		})
+	}
+}
+
+impl VirtualResourceDesc for ExternalBuffer {
+	type Resource = GpuBufferHandle;
+
+	fn ty(self, write_usage: BufferUsage, arena: &Arena) -> VirtualResourceType {
+		VirtualResourceType::GpuBuffer(GpuData {
+			desc: GpuBufferType::External(self),
+			write_usage,
+			read_usages: ArenaMap::with_hasher_in(Default::default(), arena),
+		})
+	}
+}
+
+impl VirtualResourceDesc for ExternalImage {
+	type Resource = ImageView;
+
+	fn ty(self, write_usage: ImageUsage, arena: &Arena) -> VirtualResourceType {
+		VirtualResourceType::Image(GpuData {
+			desc: ImageType::External(self),
+			write_usage,
+			read_usages: ArenaMap::with_hasher_in(Default::default(), arena),
+		})
 	}
 }
 

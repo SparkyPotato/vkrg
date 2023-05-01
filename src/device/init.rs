@@ -56,14 +56,24 @@ impl Device {
 	const VALIDATION_LAYER: &'static CStr =
 		unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") };
 
+	/// Create a device with no layers, extensions, or surface.
+	///
+	/// Enables the validation if built in debug (and if the layers are available).
 	pub fn new() -> Result<Self> { unsafe { Self::new_inner(None, &[], &[], &[]).map(|x| x.0) } }
 
+	/// Create a device with the given layers and extensions, but no surface.
+	///
+	/// Enables the validation if built in debug (and if the layers are available).
 	pub fn with_layers_and_extensions(
 		layers: &[&'static CStr], instance_extensions: &[&'static CStr], device_extensions: &[&'static CStr],
 	) -> Result<Self> {
 		unsafe { Self::new_inner(None, layers, instance_extensions, device_extensions).map(|x| x.0) }
 	}
 
+	/// Create a device with a surface on the window, but no layers and extensions.
+	///
+	/// Enables the validation if built in debug (and if the layers are available).
+	///
 	/// # Safety
 	/// `window` and `display` must outlive this `Device`.
 	/// The returned `Surface` must be destroyed before the `Device` is dropped.
@@ -79,6 +89,10 @@ impl Device {
 		.map(|x| (x.0, x.1.unwrap()))
 	}
 
+	/// Create a device with a surface on the window, with the given layers and extensions.
+	///
+	/// Enables the validation if built in debug (and if the layers are available).
+	///
 	/// # Safety
 	/// `window` and `display` must outlive this `Device`.
 	/// The returned `Surface` must be destroyed before the `Device` is dropped.

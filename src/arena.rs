@@ -1,3 +1,5 @@
+//! Fast arena allocator for ephemeral data that lasts the lifetime of a frame.
+
 use std::{
 	alloc::{handle_alloc_error, AllocError, Allocator, Global, Layout},
 	cell::UnsafeCell,
@@ -11,10 +13,12 @@ pub trait FromIteratorAlloc<T, A: Allocator>: Sized {
 	fn from_iter_alloc<I: IntoIterator<Item = T>>(iter: I, alloc: A) -> Self;
 }
 
+/// Utility trait for collecting into a container with an allocator.
 pub trait IteratorAlloc: Iterator {
 	fn collect_in<A: Allocator, C: FromIteratorAlloc<Self::Item, A>>(self, alloc: A) -> C;
 }
 
+/// Utility trait for collecting into a container with an allocator.
 impl<I: Iterator> IteratorAlloc for I {
 	fn collect_in<A: Allocator, C: FromIteratorAlloc<Self::Item, A>>(self, alloc: A) -> C {
 		C::from_iter_alloc(self, alloc)
@@ -63,8 +67,10 @@ struct Inner {
 }
 
 impl Arena {
+	/// Creates a new arena with a default block size of 1 MiB.
 	pub fn new() -> Self { Self::with_block_size(1024 * 1024) }
 
+	/// Creates a new arena with the given block size in bytes.
 	pub fn with_block_size(block_size: usize) -> Self {
 		let head = match Self::allocate_block(block_size) {
 			Ok(head) => head,
@@ -81,6 +87,9 @@ impl Arena {
 		}
 	}
 
+	/// Confirm that the arena has been reset to the beginning.
+	///
+	/// Should be called at the start of every frame.
 	pub fn reset(&mut self) {
 		let count = self.inner.get_mut().alloc_count;
 		if count != 0 {
@@ -88,6 +97,7 @@ impl Arena {
 		}
 	}
 
+	/// [`Allocator::deallocate`], but doesn't require a layout.
 	pub unsafe fn deallocate(&self, ptr: NonNull<u8>) {
 		let inner = self.inner.get();
 

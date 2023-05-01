@@ -1,3 +1,5 @@
+//! An abstraction over a raw Vulkan device.
+
 use std::{
 	mem::ManuallyDrop,
 	sync::{Mutex, MutexGuard},
@@ -35,6 +37,9 @@ struct QueueData {
 	family: u32,
 }
 
+/// Data consisting of two queue strategies:
+/// - Separate: Separate queues for graphics and presentation, async compute, and DMA transfer.
+/// - Single: One queue for all operations.
 pub enum Queues<T> {
 	Separate {
 		graphics: T, // Also supports presentation.

@@ -47,12 +47,14 @@ pub trait Resource: Default + Sized {
 	unsafe fn destroy(self, device: &Device);
 }
 
+/// A description for a buffer.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct BufferDesc {
 	pub size: usize,
 	pub usage: BufferUsageFlags,
 }
 
+/// A GPU-side buffer.
 #[derive(Default)]
 struct Buffer {
 	inner: ash::vk::Buffer,
@@ -112,6 +114,7 @@ impl Buffer {
 	}
 }
 
+/// A handle to a buffer for uploading data from the CPU to the GPU.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct UploadBufferHandle {
 	pub buffer: ash::vk::Buffer,
@@ -119,6 +122,7 @@ pub struct UploadBufferHandle {
 	pub data: NonNull<[u8]>,
 }
 
+/// A buffer for uploading data from the CPU to the GPU.
 #[derive(Default)]
 pub struct UploadBuffer {
 	inner: Buffer,
@@ -151,12 +155,14 @@ impl Resource for UploadBuffer {
 	unsafe fn destroy(self, device: &Device) { self.inner.destroy(device) }
 }
 
+/// A handle to a buffer on the GPU.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct GpuBufferHandle {
 	pub buffer: ash::vk::Buffer,
 	pub id: Option<BufferId>,
 }
 
+/// A buffer on the GPU.
 #[derive(Default)]
 pub struct GpuBuffer {
 	inner: Buffer,
@@ -180,6 +186,7 @@ impl Resource for GpuBuffer {
 	unsafe fn destroy(self, device: &Device) { self.inner.destroy(device) }
 }
 
+/// A description for an image.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageDesc {
 	pub flags: ImageCreateFlags,
@@ -191,6 +198,7 @@ pub struct ImageDesc {
 	pub usage: ImageUsageFlags,
 }
 
+/// A GPU-side image.
 #[derive(Default)]
 pub struct Image {
 	inner: ash::vk::Image,
@@ -246,6 +254,7 @@ impl Resource for Image {
 	}
 }
 
+/// The usage of an image view.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum ImageViewUsage {
 	None,
@@ -254,6 +263,7 @@ pub enum ImageViewUsage {
 	Both,
 }
 
+/// A description for an image view.
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageViewDesc {
 	pub image: ash::vk::Image,
@@ -262,9 +272,11 @@ pub struct ImageViewDesc {
 	pub usage: ImageViewUsage,
 }
 
+/// A GPU-side image view.
 #[derive(Default, Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ImageView {
-	pub inner: ash::vk::ImageView,
+	pub image: ash::vk::Image,
+	pub view: ash::vk::ImageView,
 	pub id: Option<ImageId>,
 	pub storage_id: Option<StorageImageId>,
 }
@@ -315,7 +327,8 @@ impl Resource for ImageView {
 			};
 
 			Ok(Self {
-				inner: view,
+				image: desc.image,
+				view,
 				id,
 				storage_id,
 			})
@@ -330,12 +343,12 @@ impl Resource for ImageView {
 			if let Some(id) = self.storage_id {
 				device.base_descriptors().return_storage_image(id);
 			}
-			device.device().destroy_image_view(self.inner, None);
+			device.device().destroy_image_view(self.view, None);
 		}
 	}
 }
 
-pub fn image_aspect_mask(format: Format) -> ImageAspectFlags {
+pub(crate) fn image_aspect_mask(format: Format) -> ImageAspectFlags {
 	match format {
 		Format::D16_UNORM
 		| Format::D32_SFLOAT
@@ -347,7 +360,7 @@ pub fn image_aspect_mask(format: Format) -> ImageAspectFlags {
 	}
 }
 
-pub fn sampled_image_layout(format: Format) -> ImageLayout {
+pub(crate) fn sampled_image_layout(format: Format) -> ImageLayout {
 	match format {
 		Format::D16_UNORM | Format::X8_D24_UNORM_PACK32 | Format::D32_SFLOAT => ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
 		Format::D16_UNORM_S8_UINT | Format::D24_UNORM_S8_UINT | Format::D32_SFLOAT_S8_UINT => {

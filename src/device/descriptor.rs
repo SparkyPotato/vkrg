@@ -1,3 +1,5 @@
+//! Abstractions around descriptor indexing, for efficient and easy resource access on the GPU.
+
 use std::{collections::VecDeque, num::NonZeroU32, sync::Mutex};
 
 use ash::{
@@ -30,18 +32,34 @@ use ash::{
 
 use crate::Result;
 
+/// An ID representing a storage buffer, for use by a shader.
+///
+/// Is a `u32`, bound to binding `0`.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(NonZeroU32);
+/// An ID representing a sampled image, for use by a shader.
+///
+/// Is a `u32`, bound to binding `1`.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ImageId(NonZeroU32);
+/// An ID representing a storage image, for use by a shader.
+///
+/// Is a `u32`, bound to binding `2`.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StorageImageId(NonZeroU32);
+/// An ID representing a sampler, for use by a shader.
+///
+/// Is a `u32`, bound to binding `3`.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SamplerId(NonZeroU32);
 
 pub struct Descriptors {
 	pool: DescriptorPool,
-	pub layout: DescriptorSetLayout,
+	layout: DescriptorSetLayout,
 	inner: Mutex<Inner>,
 }
 
@@ -54,109 +72,6 @@ struct Inner {
 }
 
 impl Descriptors {
-	pub fn new(device: &Device) -> Result<Self> {
-		let storage_buffer_count = 512 * 1024;
-		let sampled_image_count = 512 * 1024;
-		let storage_image_count = 64 * 1024;
-		let sampler_count = 512;
-
-		let binding_flags = DescriptorBindingFlags::UPDATE_AFTER_BIND
-			| DescriptorBindingFlags::PARTIALLY_BOUND
-			| DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING;
-
-		let set_layout = [
-			DescriptorSetLayoutBinding::builder()
-				.binding(0)
-				.descriptor_type(DescriptorType::STORAGE_BUFFER)
-				.descriptor_count(storage_buffer_count)
-				.stage_flags(ShaderStageFlags::ALL)
-				.build(),
-			DescriptorSetLayoutBinding::builder()
-				.binding(1)
-				.descriptor_type(DescriptorType::SAMPLED_IMAGE)
-				.descriptor_count(sampled_image_count)
-				.stage_flags(ShaderStageFlags::ALL)
-				.build(),
-			DescriptorSetLayoutBinding::builder()
-				.binding(2)
-				.descriptor_type(DescriptorType::STORAGE_IMAGE)
-				.descriptor_count(storage_image_count)
-				.stage_flags(ShaderStageFlags::ALL)
-				.build(),
-			DescriptorSetLayoutBinding::builder()
-				.binding(3)
-				.descriptor_type(DescriptorType::SAMPLER)
-				.descriptor_count(sampler_count)
-				.stage_flags(ShaderStageFlags::ALL)
-				.build(),
-		];
-		let layout = unsafe {
-			device.create_descriptor_set_layout(
-				&DescriptorSetLayoutCreateInfo::builder()
-					.bindings(&set_layout)
-					.flags(DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
-					.push_next(
-						&mut DescriptorSetLayoutBindingFlagsCreateInfo::builder().binding_flags(&[
-							binding_flags,
-							binding_flags,
-							binding_flags,
-							binding_flags,
-						]),
-					),
-				None,
-			)?
-		};
-
-		let pool = unsafe {
-			device.create_descriptor_pool(
-				&DescriptorPoolCreateInfo::builder()
-					.max_sets(1)
-					.pool_sizes(&[
-						DescriptorPoolSize::builder()
-							.ty(DescriptorType::STORAGE_BUFFER)
-							.descriptor_count(storage_buffer_count)
-							.build(),
-						DescriptorPoolSize::builder()
-							.ty(DescriptorType::SAMPLED_IMAGE)
-							.descriptor_count(sampled_image_count)
-							.build(),
-						DescriptorPoolSize::builder()
-							.ty(DescriptorType::STORAGE_IMAGE)
-							.descriptor_count(storage_image_count)
-							.build(),
-						DescriptorPoolSize::builder()
-							.ty(DescriptorType::SAMPLER)
-							.descriptor_count(sampler_count)
-							.build(),
-					])
-					.flags(DescriptorPoolCreateFlags::UPDATE_AFTER_BIND),
-				None,
-			)?
-		};
-
-		let set = unsafe {
-			device.allocate_descriptor_sets(
-				&DescriptorSetAllocateInfo::builder()
-					.descriptor_pool(pool)
-					.set_layouts(&[layout]),
-			)?[0]
-		};
-
-		let ret = Ok(Descriptors {
-			pool,
-			layout,
-			inner: Mutex::new(Inner {
-				set,
-				storage_buffers: FreeIndices::new(storage_buffer_count),
-				sampled_images: FreeIndices::new(sampled_image_count),
-				storage_images: FreeIndices::new(storage_image_count),
-				samplers: FreeIndices::new(sampler_count),
-			}),
-		});
-
-		ret
-	}
-
 	pub fn get_buffer(&self, device: &Device, buffer: Buffer) -> BufferId {
 		let mut inner = self.inner.lock().unwrap();
 
@@ -263,13 +178,119 @@ impl Descriptors {
 		inner.samplers.return_index(index.0);
 	}
 
-	pub unsafe fn cleanup(&mut self, device: &Device) {
+	/// Get a `DescriptorSetLayout` that should be used when making pipelines.
+	pub fn layout(&self) -> DescriptorSetLayout { self.layout }
+
+	pub(super) fn new(device: &Device) -> Result<Self> {
+		let storage_buffer_count = 512 * 1024;
+		let sampled_image_count = 512 * 1024;
+		let storage_image_count = 64 * 1024;
+		let sampler_count = 512;
+
+		let binding_flags = DescriptorBindingFlags::UPDATE_AFTER_BIND
+			| DescriptorBindingFlags::PARTIALLY_BOUND
+			| DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING;
+
+		let set_layout = [
+			DescriptorSetLayoutBinding::builder()
+				.binding(0)
+				.descriptor_type(DescriptorType::STORAGE_BUFFER)
+				.descriptor_count(storage_buffer_count)
+				.stage_flags(ShaderStageFlags::ALL)
+				.build(),
+			DescriptorSetLayoutBinding::builder()
+				.binding(1)
+				.descriptor_type(DescriptorType::SAMPLED_IMAGE)
+				.descriptor_count(sampled_image_count)
+				.stage_flags(ShaderStageFlags::ALL)
+				.build(),
+			DescriptorSetLayoutBinding::builder()
+				.binding(2)
+				.descriptor_type(DescriptorType::STORAGE_IMAGE)
+				.descriptor_count(storage_image_count)
+				.stage_flags(ShaderStageFlags::ALL)
+				.build(),
+			DescriptorSetLayoutBinding::builder()
+				.binding(3)
+				.descriptor_type(DescriptorType::SAMPLER)
+				.descriptor_count(sampler_count)
+				.stage_flags(ShaderStageFlags::ALL)
+				.build(),
+		];
+		let layout = unsafe {
+			device.create_descriptor_set_layout(
+				&DescriptorSetLayoutCreateInfo::builder()
+					.bindings(&set_layout)
+					.flags(DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+					.push_next(
+						&mut DescriptorSetLayoutBindingFlagsCreateInfo::builder().binding_flags(&[
+							binding_flags,
+							binding_flags,
+							binding_flags,
+							binding_flags,
+						]),
+					),
+				None,
+			)?
+		};
+
+		let pool = unsafe {
+			device.create_descriptor_pool(
+				&DescriptorPoolCreateInfo::builder()
+					.max_sets(1)
+					.pool_sizes(&[
+						DescriptorPoolSize::builder()
+							.ty(DescriptorType::STORAGE_BUFFER)
+							.descriptor_count(storage_buffer_count)
+							.build(),
+						DescriptorPoolSize::builder()
+							.ty(DescriptorType::SAMPLED_IMAGE)
+							.descriptor_count(sampled_image_count)
+							.build(),
+						DescriptorPoolSize::builder()
+							.ty(DescriptorType::STORAGE_IMAGE)
+							.descriptor_count(storage_image_count)
+							.build(),
+						DescriptorPoolSize::builder()
+							.ty(DescriptorType::SAMPLER)
+							.descriptor_count(sampler_count)
+							.build(),
+					])
+					.flags(DescriptorPoolCreateFlags::UPDATE_AFTER_BIND),
+				None,
+			)?
+		};
+
+		let set = unsafe {
+			device.allocate_descriptor_sets(
+				&DescriptorSetAllocateInfo::builder()
+					.descriptor_pool(pool)
+					.set_layouts(&[layout]),
+			)?[0]
+		};
+
+		let ret = Ok(Descriptors {
+			pool,
+			layout,
+			inner: Mutex::new(Inner {
+				set,
+				storage_buffers: FreeIndices::new(storage_buffer_count),
+				sampled_images: FreeIndices::new(sampled_image_count),
+				storage_images: FreeIndices::new(storage_image_count),
+				samplers: FreeIndices::new(sampler_count),
+			}),
+		});
+
+		ret
+	}
+
+	pub(super) unsafe fn cleanup(&mut self, device: &Device) {
 		device.destroy_descriptor_set_layout(self.layout, None);
 		device.destroy_descriptor_pool(self.pool, None);
 	}
 }
 
-pub struct FreeIndices {
+struct FreeIndices {
 	max: u32,
 	unallocated: u32,
 	returned: VecDeque<NonZeroU32>,
