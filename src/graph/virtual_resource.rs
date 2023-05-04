@@ -11,6 +11,7 @@ use ash::vk::{
 	ImageViewType,
 	PipelineStageFlags2,
 	SampleCountFlags,
+	Semaphore,
 };
 
 use crate::{
@@ -137,11 +138,29 @@ impl ImageUsage {
 	}
 }
 
-/// The previous access of an external buffer to be synchronized against.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Default, Debug)]
+/// Synchronization required to access an external resource.
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug, Default)]
+pub struct ExternalSync<A> {
+	/// The semaphore to wait on. If no cross-queue sync is required, this is `::null()`.
+	pub semaphore: Semaphore,
+	/// If `semaphore` is a timeline semaphore, the value to set.
+	pub value: u64,
+	/// The access to the resource.
+	pub access: A,
+}
+
+/// An access of a resource.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
 pub struct Access {
 	pub stage: PipelineStageFlags2,
 	pub access: AccessFlags2,
+}
+
+/// An access of an image.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
+pub struct ImageAccess {
+	pub access: Access,
+	pub layout: ImageLayout,
 }
 
 /// A buffer external to the render graph.
@@ -150,14 +169,8 @@ pub struct Access {
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ExternalBuffer {
 	pub handle: GpuBufferHandle,
-	pub previous_access: Access,
-}
-
-/// The previous access of an external image to be synchronized against.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Default, Debug)]
-pub struct ImageAccess {
-	pub access: Access,
-	pub layout: ImageLayout,
+	pub pre_sync: ExternalSync<Access>,
+	pub post_sync: ExternalSync<Access>,
 }
 
 /// An image external to the render graph.
@@ -166,7 +179,8 @@ pub struct ImageAccess {
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub struct ExternalImage {
 	pub handle: ash::vk::Image,
-	pub previous_access: ImageAccess,
+	pub pre_sync: ExternalSync<ImageAccess>,
+	pub post_sync: ExternalSync<Access>,
 }
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
@@ -278,7 +292,7 @@ impl VirtualResourceDesc for UploadBufferDesc {
 impl VirtualResource for GpuBufferHandle {
 	type Usage = BufferUsage;
 
-	unsafe fn from_res(_: u32, res: &Resource, _: &mut Caches, _: &Device) -> Self { res.gpu_buffer().0.handle }
+	unsafe fn from_res(_: u32, res: &Resource, _: &mut Caches, _: &Device) -> Self { res.gpu_buffer().resource.handle }
 
 	unsafe fn add_read_usage(res: &mut VirtualResourceData, pass: u32, usage: Self::Usage) {
 		res.ty.gpu_buffer().read_usages.insert(pass, usage);
@@ -301,8 +315,8 @@ impl VirtualResource for ImageView {
 	type Usage = ImageUsage;
 
 	unsafe fn from_res(pass: u32, res: &Resource, caches: &mut Caches, device: &Device) -> Self {
-		let (res, _) = res.image();
-		let usage = res.usages[&pass].usage;
+		let res = &res.image().resource;
+		let usage = res.usages[&pass].access;
 
 		caches
 			.image_views

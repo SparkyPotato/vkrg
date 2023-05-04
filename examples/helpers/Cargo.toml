@@ -1,0 +1,10 @@
+[package]
+name = "helpers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vkrg = { path = "../.." }
+
+naga = { version = "0.11.0", features = ["wgsl-in", "spv-out"] }
+winit = "0.28.3"

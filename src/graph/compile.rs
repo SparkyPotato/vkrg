@@ -11,6 +11,7 @@ use ash::vk::{
 	ImageSubresourceRange,
 	ImageUsageFlags,
 	PipelineStageFlags2,
+	Semaphore,
 	REMAINING_ARRAY_LAYERS,
 	REMAINING_MIP_LEVELS,
 };
@@ -33,6 +34,7 @@ use crate::{
 			VirtualResourceType,
 		},
 		ArenaMap,
+		ExternalSync,
 		Frame,
 		GpuBufferHandle,
 		ImageUsage,
@@ -54,6 +56,8 @@ pub(super) struct CompiledFrame<'pass, 'graph> {
 pub struct Synchronization<'graph> {
 	pub barriers: ArenaMap<'graph, Access, Access>,
 	pub image_barriers: Vec<ImageMemoryBarrier2, &'graph Arena>,
+	pub pre_sync: Vec<ExternalSync<Access>, &'graph Arena>,
+	pub post_sync: Vec<ExternalSync<Access>, &'graph Arena>,
 }
 
 #[derive(Copy, Clone)]
@@ -65,7 +69,7 @@ pub enum DataState {
 #[derive(Copy, Clone)]
 pub struct Usage<U> {
 	pub write: bool,
-	pub usage: U,
+	pub access: U,
 }
 
 pub struct GpuResource<'graph, H, U> {
@@ -73,11 +77,17 @@ pub struct GpuResource<'graph, H, U> {
 	pub usages: BTreeMap<u32, Usage<U>, &'graph Arena>,
 }
 
+pub struct SyncedResource<'graph, H, U, A> {
+	pub resource: GpuResource<'graph, H, U>,
+	pub pre_sync: ExternalSync<A>,
+	pub post_sync: ExternalSync<Access>,
+}
+
 pub enum Resource<'graph> {
 	Data(NonNull<()>, DataState),
 	UploadBuffer(UploadBufferHandle),
-	GpuBuffer(GpuResource<'graph, GpuBufferHandle, BufferUsage>, Option<Access>),
-	Image(GpuResource<'graph, Image, ImageUsage>, Option<ImageAccess>),
+	GpuBuffer(SyncedResource<'graph, GpuBufferHandle, BufferUsage, Access>),
+	Image(SyncedResource<'graph, Image, ImageUsage, ImageAccess>),
 }
 
 impl<'graph> Resource<'graph> {
@@ -95,16 +105,16 @@ impl<'graph> Resource<'graph> {
 		}
 	}
 
-	pub unsafe fn gpu_buffer(&self) -> (&GpuResource<'graph, GpuBufferHandle, BufferUsage>, Option<Access>) {
+	pub unsafe fn gpu_buffer(&self) -> &SyncedResource<'graph, GpuBufferHandle, BufferUsage, Access> {
 		match self {
-			Resource::GpuBuffer(res, prev) => (res, *prev),
+			Resource::GpuBuffer(res) => res,
 			_ => unreachable_unchecked(),
 		}
 	}
 
-	pub unsafe fn image(&self) -> (&GpuResource<'graph, Image, ImageUsage>, Option<ImageAccess>) {
+	pub unsafe fn image(&self) -> &SyncedResource<'graph, Image, ImageUsage, ImageAccess> {
 		match self {
-			Resource::Image(res, prev) => (res, *prev),
+			Resource::Image(res) => res,
 			_ => unreachable_unchecked(),
 		}
 	}
@@ -139,14 +149,14 @@ impl<'graph> ResourceMap<'graph> {
 
 	fn arena(&self) -> &'graph Arena { self.resources.allocator() }
 
-	fn buffers(&self) -> impl Iterator<Item = (&GpuResource<'graph, GpuBufferHandle, BufferUsage>, Option<Access>)> {
+	fn buffers(&self) -> impl Iterator<Item = &SyncedResource<'graph, GpuBufferHandle, BufferUsage, Access>> {
 		self.buffers.iter().map(move |&id| unsafe {
 			let res = self.resources.get_unchecked(id as usize);
 			res.gpu_buffer()
 		})
 	}
 
-	fn images(&self) -> impl Iterator<Item = (&GpuResource<'graph, Image, ImageUsage>, Option<ImageAccess>)> {
+	fn images(&self) -> impl Iterator<Item = &SyncedResource<'graph, Image, ImageUsage, ImageAccess>> {
 		self.images.iter().map(move |&id| unsafe {
 			let res = self.resources.get_unchecked(id as usize);
 			res.image()
@@ -186,8 +196,16 @@ enum ResourceDescType<'graph> {
 	UploadBuffer(BufferDesc),
 	GpuBuffer(GpuResource<'graph, BufferDesc, BufferUsage>),
 	Image(GpuResource<'graph, ImageDesc, ImageUsage>),
-	ExternalBuffer(GpuResource<'graph, GpuBufferHandle, BufferUsage>, Access),
-	ExternalImage(GpuResource<'graph, Image, ImageUsage>, ImageAccess),
+	ExternalBuffer {
+		desc: GpuResource<'graph, GpuBufferHandle, BufferUsage>,
+		pre_sync: ExternalSync<Access>,
+		post_sync: ExternalSync<Access>,
+	},
+	ExternalImage {
+		desc: GpuResource<'graph, Image, ImageUsage>,
+		pre_sync: ExternalSync<ImageAccess>,
+		post_sync: ExternalSync<Access>,
+	},
 }
 
 impl<'graph> VirtualResourceType<'graph> {
@@ -220,12 +238,20 @@ impl<'graph> VirtualResourceType<'graph> {
 					let arena = *read_usages.allocator();
 					read_usages
 						.into_iter()
-						.map(|(pass, usage)| (pass, Usage { write: false, usage }))
+						.map(|(pass, usage)| {
+							(
+								pass,
+								Usage {
+									write: false,
+									access: usage,
+								},
+							)
+						})
 						.chain(std::iter::once((
 							pass,
 							Usage {
 								write: true,
-								usage: write_usage,
+								access: write_usage,
 							},
 						)))
 						.collect_in(arena)
@@ -235,26 +261,35 @@ impl<'graph> VirtualResourceType<'graph> {
 				desc: GpuBufferType::External(buf),
 				write_usage,
 				read_usages,
-			}) => ResourceDescType::ExternalBuffer(
-				GpuResource {
+			}) => ResourceDescType::ExternalBuffer {
+				desc: GpuResource {
 					handle: buf.handle,
 					usages: {
 						let arena = *read_usages.allocator();
 						read_usages
 							.into_iter()
-							.map(|(pass, usage)| (pass, Usage { write: false, usage }))
+							.map(|(pass, usage)| {
+								(
+									pass,
+									Usage {
+										write: false,
+										access: usage,
+									},
+								)
+							})
 							.chain(std::iter::once((
 								pass,
 								Usage {
 									write: true,
-									usage: write_usage,
+									access: write_usage,
 								},
 							)))
 							.collect_in(arena)
 					},
 				},
-				buf.previous_access,
-			),
+				pre_sync: buf.pre_sync,
+				post_sync: buf.post_sync,
+			},
 			VirtualResourceType::Image(GpuData {
 				desc: ImageType::Internal(desc),
 				read_usages,
@@ -268,7 +303,7 @@ impl<'graph> VirtualResourceType<'graph> {
 					pass,
 					Usage {
 						write: true,
-						usage: write_usage,
+						access: write_usage,
 					},
 				);
 
@@ -280,7 +315,7 @@ impl<'graph> VirtualResourceType<'graph> {
 						pass,
 						Usage {
 							write: false,
-							usage: read,
+							access: read,
 						},
 					);
 
@@ -313,7 +348,7 @@ impl<'graph> VirtualResourceType<'graph> {
 					pass,
 					Usage {
 						write: true,
-						usage: write_usage,
+						access: write_usage,
 					},
 				);
 
@@ -322,22 +357,31 @@ impl<'graph> VirtualResourceType<'graph> {
 						pass,
 						Usage {
 							write: false,
-							usage: read,
+							access: read,
 						},
 					);
 				}
 
-				ResourceDescType::ExternalImage(
-					GpuResource {
+				ResourceDescType::ExternalImage {
+					desc: GpuResource {
 						handle: img.handle,
 						usages,
 					},
-					ImageAccess {
-						access: img.previous_access.access,
-						layout: img.previous_access.layout,
-						format: write_usage.format,
+					pre_sync: ExternalSync {
+						semaphore: img.pre_sync.semaphore,
+						value: img.pre_sync.value,
+						access: ImageAccess {
+							access: img.pre_sync.access.access,
+							layout: img.pre_sync.access.layout,
+							format: write_usage.format,
+						},
 					},
-				)
+					post_sync: ExternalSync {
+						semaphore: img.post_sync.semaphore,
+						value: img.post_sync.value,
+						access: img.post_sync.access,
+					},
+				}
 			},
 		}
 	}
@@ -404,7 +448,7 @@ impl<'a> ResourceDesc<'a> {
 					other.lifetime.start,
 					Usage {
 						write: true,
-						usage: write_usage,
+						access: write_usage,
 					},
 				);
 
@@ -415,7 +459,7 @@ impl<'a> ResourceDesc<'a> {
 						pass,
 						Usage {
 							write: false,
-							usage: read,
+							access: read,
 						},
 					);
 				}
@@ -440,7 +484,7 @@ impl<'a> ResourceDesc<'a> {
 					other.lifetime.start,
 					Usage {
 						write: true,
-						usage: write_usage,
+						access: write_usage,
 					},
 				);
 
@@ -452,7 +496,7 @@ impl<'a> ResourceDesc<'a> {
 						pass,
 						Usage {
 							write: false,
-							usage: read,
+							access: read,
 						},
 					);
 				}
@@ -543,8 +587,8 @@ impl<'graph> ResourceAliaser<'graph> {
 			),
 			ResourceDescType::GpuBuffer(desc) => {
 				buffers.push(i as _);
-				Resource::GpuBuffer(
-					GpuResource {
+				Resource::GpuBuffer(SyncedResource {
+					resource: GpuResource {
 						handle: graph
 							.caches
 							.gpu_buffers
@@ -552,23 +596,29 @@ impl<'graph> ResourceAliaser<'graph> {
 							.expect("failed to allocate gpu buffer"),
 						usages: desc.usages,
 					},
-					None,
-				)
+					pre_sync: ExternalSync::default(),
+					post_sync: ExternalSync::default(),
+				})
 			},
-			ResourceDescType::ExternalBuffer(desc, prev) => {
+			ResourceDescType::ExternalBuffer {
+				desc,
+				pre_sync,
+				post_sync,
+			} => {
 				buffers.push(i as _);
-				Resource::GpuBuffer(
-					GpuResource {
+				Resource::GpuBuffer(SyncedResource {
+					resource: GpuResource {
 						handle: desc.handle,
 						usages: desc.usages,
 					},
-					Some(prev),
-				)
+					pre_sync,
+					post_sync,
+				})
 			},
 			ResourceDescType::Image(desc) => {
 				images.push(i as _);
-				Resource::Image(
-					GpuResource {
+				Resource::Image(SyncedResource {
+					resource: GpuResource {
 						handle: graph
 							.caches
 							.images
@@ -576,18 +626,24 @@ impl<'graph> ResourceAliaser<'graph> {
 							.expect("failed to allocate image"),
 						usages: desc.usages,
 					},
-					None,
-				)
+					pre_sync: ExternalSync::default(),
+					post_sync: ExternalSync::default(),
+				})
 			},
-			ResourceDescType::ExternalImage(desc, prev) => {
+			ResourceDescType::ExternalImage {
+				desc,
+				pre_sync,
+				post_sync,
+			} => {
 				images.push(i as _);
-				Resource::Image(
-					GpuResource {
+				Resource::Image(SyncedResource {
+					resource: GpuResource {
 						handle: desc.handle,
 						usages: desc.usages,
 					},
-					Some(prev),
-				)
+					pre_sync,
+					post_sync,
+				})
 			},
 		});
 
@@ -762,12 +818,12 @@ impl<'a, T: Iterator<Item = (u32, Usage<U>)>, U: AccessExt> Iterator for MergeRe
 				pass,
 				Usage {
 					write: false,
-					mut usage,
+					access: mut usage,
 				},
 			) => {
 				while let Some((_, next_usage)) = self.iter.peek() {
 					if !next_usage.write {
-						if let Some(u) = usage.merge(&next_usage.usage) {
+						if let Some(u) = usage.merge(&next_usage.access) {
 							usage = u;
 							self.iter.next();
 						} else {
@@ -777,7 +833,13 @@ impl<'a, T: Iterator<Item = (u32, Usage<U>)>, U: AccessExt> Iterator for MergeRe
 						break;
 					}
 				}
-				Some((pass, Usage { write: false, usage }))
+				Some((
+					pass,
+					Usage {
+						write: false,
+						access: usage,
+					},
+				))
 			},
 		}
 	}
@@ -797,61 +859,104 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 		let mut sync: Vec<_, _> = std::iter::repeat_with(|| Synchronization {
 			barriers: ArenaMap::with_hasher_in(Default::default(), self.resource_map.arena()),
 			image_barriers: Vec::new_in(self.resource_map.arena()),
+			pre_sync: Vec::new_in(self.resource_map.arena()),
+			post_sync: Vec::new_in(self.resource_map.arena()),
 		})
 		.take(self.passes.len())
 		.collect_in(self.resource_map.arena());
 
-		for (buffer, mut prev_access) in self.resource_map.buffers() {
-			for (pass, access) in MergeReads::new(buffer.usages.iter().map(|(&x, &y)| {
+		for buffer in self.resource_map.buffers() {
+			let mut prev_access = (buffer.pre_sync.semaphore == Semaphore::null())
+				.then(|| {
+					let access = buffer.pre_sync.access;
+					if access.access != AccessFlags2::NONE || access.stage != PipelineStageFlags2::NONE {
+						Some(access)
+					} else {
+						None
+					}
+				})
+				.flatten();
+
+			for (pass, access) in MergeReads::new(buffer.resource.usages.iter().map(|(&x, &y)| {
 				(
 					x,
 					Usage {
 						write: y.write,
-						usage: buffer_access(y.usage, y.write),
+						access: buffer_access(y.access, y.write),
 					},
 				)
 			})) {
+				let sync = &mut sync[pass as usize];
 				if let Some(prev) = prev_access {
-					let barrier = sync[pass as usize].barriers.entry(prev).or_default();
-					*barrier = barrier.merge(&access.usage).unwrap();
-					prev_access = Some(access.usage);
+					let barrier = sync.barriers.entry(prev).or_default();
+					*barrier = barrier.merge(&access.access).unwrap();
+					prev_access = Some(access.access);
+				}
+
+				if buffer.pre_sync.semaphore != Semaphore::null() {
+					sync.pre_sync.push(buffer.pre_sync);
+				}
+				if buffer.post_sync.semaphore != Semaphore::null() {
+					sync.post_sync.push(buffer.post_sync);
 				}
 			}
 		}
 
-		for (image, mut prev_access) in self.resource_map.images() {
-			for (pass, access) in MergeReads::new(image.usages.iter().map(|(&x, &y)| {
+		for image in self.resource_map.images() {
+			let mut prev_access = (image.pre_sync.semaphore == Semaphore::null())
+				.then(|| {
+					let access = image.pre_sync.access;
+					if access.access.access != AccessFlags2::NONE || access.access.stage != PipelineStageFlags2::NONE {
+						Some(access)
+					} else {
+						None
+					}
+				})
+				.flatten();
+
+			for (pass, access) in MergeReads::new(image.resource.usages.iter().map(|(&x, &y)| {
 				(
 					x,
 					Usage {
 						write: y.write,
-						usage: image_access(y.usage, y.write),
+						access: image_access(y.access, y.write),
 					},
 				)
 			})) {
+				let sync = &mut sync[pass as usize];
 				if let Some(prev) = prev_access {
-					let sync = &mut sync[pass as usize];
-					if prev.layout == access.usage.layout {
+					if prev.layout == access.access.layout {
 						if let Some(barrier) = sync.barriers.get_mut(&prev.access) {
 							// If there's no layout transition and an existing memory barrier, merge ourselves with it.
-							*barrier = barrier.merge(&access.usage.access).unwrap();
+							*barrier = barrier.merge(&access.access.access).unwrap();
 							prev_access = Some(ImageAccess {
 								access: *barrier,
-								layout: access.usage.layout,
-								format: access.usage.format,
+								layout: access.access.layout,
+								format: access.access.format,
 							});
 							continue;
 						}
 					}
 
 					sync.image_barriers.push(image_barrier(
-						image.handle,
+						image.resource.handle,
 						prev,
-						access.usage,
-						access.usage.format,
+						access.access,
+						access.access.format,
 						access.write,
 					));
-					prev_access = Some(access.usage);
+					prev_access = Some(access.access);
+				}
+
+				if image.pre_sync.semaphore != Semaphore::null() {
+					sync.pre_sync.push(ExternalSync {
+						semaphore: image.pre_sync.semaphore,
+						value: image.pre_sync.value,
+						access: image.pre_sync.access.access,
+					});
+				}
+				if image.post_sync.semaphore != Semaphore::null() {
+					sync.post_sync.push(image.post_sync);
 				}
 			}
 		}

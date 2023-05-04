@@ -6,31 +6,27 @@ use std::{
 	marker::PhantomData,
 };
 
-use ash::vk::{
-	CommandBuffer,
-	CommandBufferSubmitInfo,
-	DependencyInfo,
-	Fence,
-	MemoryBarrier2,
-	SemaphoreSubmitInfo,
-	SubmitInfo2,
-};
+use ash::vk::{CommandBuffer, DependencyInfo, MemoryBarrier2};
 use hashbrown::HashMap;
 use rustc_hash::FxHasher;
 use tracing::{span, Level};
 
-pub use crate::graph::virtual_resource::{
-	Access,
-	BufferUsage,
-	ExternalBuffer,
-	ExternalImage,
-	GpuBufferDesc,
-	ImageAccess,
-	ImageDesc,
-	ImageUsage,
-	ImageUsageType,
-	Shader,
-	UploadBufferDesc,
+pub use crate::graph::{
+	frame_data::TimelineSemaphore,
+	virtual_resource::{
+		Access,
+		BufferUsage,
+		ExternalBuffer,
+		ExternalImage,
+		ExternalSync,
+		GpuBufferDesc,
+		ImageAccess,
+		ImageDesc,
+		ImageUsage,
+		ImageUsageType,
+		Shader,
+		UploadBufferDesc,
+	},
 };
 use crate::{
 	arena::{Arena, IteratorAlloc},
@@ -38,7 +34,7 @@ use crate::{
 	graph::{
 		cache::{ResourceCache, UniqueCache},
 		compile::{DataState, ResourceMap},
-		frame_data::FrameData,
+		frame_data::{FrameData, Submitter},
 		virtual_resource::{
 			ResourceLifetime,
 			VirtualResource,
@@ -154,14 +150,15 @@ impl<'pass, 'graph> Frame<'pass, 'graph> {
 		let mut compiled = self.compile(device)?;
 
 		let graph = compiled.graph;
-		let data = &mut graph.frame_data[graph.curr_frame];
-		let buf = data.cmd_buf(device)?;
+		let mut submitter = Submitter::new(arena, &mut graph.frame_data, graph.curr_frame);
 
 		for (i, (pass, sync)) in compiled.passes.into_iter().zip(compiled.sync).enumerate() {
 			{
 				let name = unsafe { std::str::from_utf8_unchecked(&pass.name[..pass.name.len() - 1]) };
 				let span = span!(Level::TRACE, "run pass", name = name);
 				let _e = span.enter();
+
+				let buf = submitter.pass(&device, &sync.pre_sync, &sync.post_sync)?;
 
 				let barriers: Vec<_, _> = sync
 					.barriers
@@ -177,12 +174,14 @@ impl<'pass, 'graph> Frame<'pass, 'graph> {
 					.collect_in(arena);
 
 				unsafe {
-					device.device().cmd_pipeline_barrier2(
-						buf,
-						&DependencyInfo::builder()
-							.memory_barriers(&barriers)
-							.image_memory_barriers(&sync.image_barriers),
-					);
+					if !barriers.is_empty() || !sync.image_barriers.is_empty() {
+						device.device().cmd_pipeline_barrier2(
+							buf,
+							&DependencyInfo::builder()
+								.memory_barriers(&barriers)
+								.image_memory_barriers(&sync.image_barriers),
+						);
+					}
 				}
 
 				(pass.callback)(PassContext {
@@ -197,21 +196,7 @@ impl<'pass, 'graph> Frame<'pass, 'graph> {
 			}
 		}
 
-		let (sem, set) = data.semaphore.next();
-		unsafe {
-			let other_frame = &graph.frame_data[graph.curr_frame ^ 1];
-			device.submit_graphics(
-				&[SubmitInfo2::builder()
-					.wait_semaphore_infos(&[SemaphoreSubmitInfo::builder()
-						.semaphore(other_frame.semaphore.semaphore())
-						.value(other_frame.semaphore.value())
-						.build()])
-					.command_buffer_infos(&[CommandBufferSubmitInfo::builder().command_buffer(buf).build()])
-					.signal_semaphore_infos(&[SemaphoreSubmitInfo::builder().semaphore(sem).value(set).build()])
-					.build()],
-				Fence::null(),
-			)?;
-		}
+		submitter.finish(device)?;
 
 		let len = compiled.resource_map.cleanup();
 		graph.next_frame(len);

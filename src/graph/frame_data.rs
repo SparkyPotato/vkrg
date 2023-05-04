@@ -1,20 +1,33 @@
 use ash::vk::{
 	CommandBuffer,
 	CommandBufferAllocateInfo,
+	CommandBufferBeginInfo,
 	CommandBufferLevel,
+	CommandBufferSubmitInfo,
+	CommandBufferUsageFlags,
 	CommandPool,
 	CommandPoolCreateFlags,
 	CommandPoolCreateInfo,
 	CommandPoolResetFlags,
+	Fence,
+	PipelineStageFlags2,
 	Semaphore,
 	SemaphoreCreateInfo,
+	SemaphoreSubmitInfo,
 	SemaphoreType,
 	SemaphoreTypeCreateInfo,
 	SemaphoreWaitInfo,
+	SubmitInfo2,
 };
 
-use crate::{device::Device, Result};
+use crate::{
+	arena::{Arena, IteratorAlloc},
+	device::Device,
+	graph::{Access, ExternalSync},
+	Result,
+};
 
+/// A timeline semaphore that keeps track of the current value.
 pub struct TimelineSemaphore {
 	inner: Semaphore,
 	value: u64,
@@ -54,9 +67,8 @@ impl TimelineSemaphore {
 	}
 
 	pub fn next(&mut self) -> (Semaphore, u64) {
-		let val = self.value;
 		self.value += 1;
-		(self.inner, val)
+		(self.inner, self.value)
 	}
 
 	pub fn value(&self) -> u64 { self.value }
@@ -137,4 +149,121 @@ impl FrameData {
 			device.device().destroy_command_pool(self.pool, None);
 		}
 	}
+}
+
+pub struct Submitter<'a> {
+	data: &'a mut FrameData,
+	buf: CommandBuffer,
+	cached_wait: Vec<SemaphoreSubmitInfo, &'a Arena>,
+	cached_signal: Vec<SemaphoreSubmitInfo, &'a Arena>,
+}
+
+impl<'a> Submitter<'a> {
+	pub fn new(arena: &'a Arena, frames: &'a mut [FrameData], curr_frame: usize) -> Self {
+		let wait = &frames[curr_frame ^ 1].semaphore;
+
+		Self {
+			cached_wait: std::iter::once(
+				SemaphoreSubmitInfo::builder()
+					.stage_mask(PipelineStageFlags2::TOP_OF_PIPE)
+					.semaphore(wait.inner)
+					.value(wait.value)
+					.build(),
+			)
+			.collect_in(arena),
+			data: &mut frames[curr_frame],
+			buf: CommandBuffer::null(),
+			cached_signal: Vec::new_in(arena),
+		}
+	}
+
+	pub fn pass(
+		&mut self, device: &Device, pre_sync: &[ExternalSync<Access>], post_sync: &[ExternalSync<Access>],
+	) -> Result<CommandBuffer> {
+		match (!pre_sync.is_empty(), !post_sync.is_empty()) {
+			(false, false) => self.ensure_buf(device)?,
+			(true, false) => {
+				self.submit(&device)?;
+				self.ensure_buf(device)?;
+				self.cached_wait.extend(sync_to_info(pre_sync));
+			},
+			(false, true) => {
+				if !self.cached_signal.is_empty() {
+					self.submit(&device)?;
+					self.ensure_buf(device)?;
+				}
+				self.cached_signal.extend(sync_to_info(post_sync));
+			},
+			(true, true) => {
+				self.submit(&device)?;
+				self.ensure_buf(device)?;
+				self.cached_wait.extend(sync_to_info(pre_sync));
+				self.cached_signal.extend(sync_to_info(post_sync));
+			},
+		}
+
+		Ok(self.buf)
+	}
+
+	pub fn finish(mut self, device: &Device) -> Result<()> {
+		let (sem, set) = self.data.semaphore.next();
+		self.cached_signal.push(
+			SemaphoreSubmitInfo::builder()
+				.stage_mask(PipelineStageFlags2::BOTTOM_OF_PIPE)
+				.semaphore(sem)
+				.value(set)
+				.build(),
+		);
+		self.submit(device)
+	}
+
+	fn submit(&mut self, device: &Device) -> Result<()> {
+		unsafe {
+			if self.buf != CommandBuffer::null() {
+				device.device().end_command_buffer(self.buf)?;
+				let ret = device.submit_graphics(
+					&[SubmitInfo2::builder()
+						.wait_semaphore_infos(&self.cached_wait)
+						.command_buffer_infos(&[CommandBufferSubmitInfo::builder().command_buffer(self.buf).build()])
+						.signal_semaphore_infos(&self.cached_signal)
+						.build()],
+					Fence::null(),
+				);
+
+				self.cached_wait.clear();
+				self.cached_signal.clear();
+				self.buf = CommandBuffer::null();
+
+				ret
+			} else {
+				Ok(())
+			}
+		}
+	}
+
+	fn ensure_buf(&mut self, device: &Device) -> Result<()> {
+		if self.buf == CommandBuffer::null() {
+			self.buf = self.data.cmd_buf(device)?;
+			unsafe {
+				device.device().begin_command_buffer(
+					self.buf,
+					&CommandBufferBeginInfo::builder().flags(CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+				)?;
+			}
+		}
+
+		Ok(())
+	}
+}
+
+fn sync_to_info<'a>(
+	sync: impl IntoIterator<Item = &'a ExternalSync<Access>> + 'a,
+) -> impl Iterator<Item = SemaphoreSubmitInfo> + 'a {
+	sync.into_iter().map(|sync| {
+		SemaphoreSubmitInfo::builder()
+			.stage_mask(sync.access.stage)
+			.semaphore(sync.semaphore)
+			.value(sync.value)
+			.build()
+	})
 }

@@ -100,6 +100,12 @@ impl Device {
 
 	pub fn queue_families(&self) -> Queues<u32> { self.queues.map(|data| data.family) }
 
+	pub fn graphics_queue(&self) -> MutexGuard<'_, Queue> { self.queues.graphics().queue.lock().unwrap() }
+
+	pub fn compute_queue(&self) -> MutexGuard<'_, Queue> { self.queues.compute().queue.lock().unwrap() }
+
+	pub fn transfer_queue(&self) -> MutexGuard<'_, Queue> { self.queues.transfer().queue.lock().unwrap() }
+
 	pub fn allocator(&self) -> MutexGuard<'_, Allocator> { self.allocator.lock().unwrap() }
 
 	pub fn base_descriptors(&self) -> &Descriptors { &self.descriptors }
