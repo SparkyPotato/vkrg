@@ -57,14 +57,35 @@ pub struct StorageImageId(NonZeroU32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SamplerId(NonZeroU32);
 
+#[cfg(feature = "bytemuck")]
+mod bytemuck {
+	use super::*;
+
+	unsafe impl ::bytemuck::NoUninit for BufferId {}
+	unsafe impl ::bytemuck::PodInOption for BufferId {}
+	unsafe impl ::bytemuck::ZeroableInOption for BufferId {}
+
+	unsafe impl ::bytemuck::NoUninit for ImageId {}
+	unsafe impl ::bytemuck::PodInOption for ImageId {}
+	unsafe impl ::bytemuck::ZeroableInOption for ImageId {}
+
+	unsafe impl ::bytemuck::NoUninit for StorageImageId {}
+	unsafe impl ::bytemuck::PodInOption for StorageImageId {}
+	unsafe impl ::bytemuck::ZeroableInOption for StorageImageId {}
+
+	unsafe impl ::bytemuck::NoUninit for SamplerId {}
+	unsafe impl ::bytemuck::PodInOption for SamplerId {}
+	unsafe impl ::bytemuck::ZeroableInOption for SamplerId {}
+}
+
 pub struct Descriptors {
 	pool: DescriptorPool,
 	layout: DescriptorSetLayout,
+	set: DescriptorSet,
 	inner: Mutex<Inner>,
 }
 
 struct Inner {
-	set: DescriptorSet,
 	storage_buffers: FreeIndices,
 	sampled_images: FreeIndices,
 	storage_images: FreeIndices,
@@ -72,24 +93,30 @@ struct Inner {
 }
 
 impl Descriptors {
+	pub fn set(&self) -> DescriptorSet { self.set }
+
+	/// Get a `DescriptorSetLayout` that should be used when making pipelines.
+	pub fn layout(&self) -> DescriptorSetLayout { self.layout }
+
 	pub fn get_buffer(&self, device: &Device, buffer: Buffer) -> BufferId {
 		let mut inner = self.inner.lock().unwrap();
 
 		let index = inner.storage_buffers.get_index();
-		let write = WriteDescriptorSet::builder()
-			.dst_set(inner.set)
-			.dst_binding(0)
-			.dst_array_element(index.into())
-			.descriptor_type(DescriptorType::STORAGE_BUFFER)
-			.buffer_info(&[DescriptorBufferInfo::builder()
-				.buffer(buffer)
-				.offset(0)
-				.range(WHOLE_SIZE)
-				.build()])
-			.build();
-
 		unsafe {
-			device.update_descriptor_sets(&[write], &[]);
+			device.update_descriptor_sets(
+				&[WriteDescriptorSet::builder()
+					.dst_set(self.set)
+					.dst_binding(0)
+					.dst_array_element(index.get())
+					.descriptor_type(DescriptorType::STORAGE_BUFFER)
+					.buffer_info(&[DescriptorBufferInfo::builder()
+						.buffer(buffer)
+						.offset(0)
+						.range(WHOLE_SIZE)
+						.build()])
+					.build()],
+				&[],
+			);
 		}
 
 		BufferId(index)
@@ -99,19 +126,20 @@ impl Descriptors {
 		let mut inner = self.inner.lock().unwrap();
 
 		let index = inner.sampled_images.get_index();
-		let write = WriteDescriptorSet::builder()
-			.dst_set(inner.set)
-			.dst_binding(1)
-			.dst_array_element(index.into())
-			.descriptor_type(DescriptorType::SAMPLED_IMAGE)
-			.image_info(&[DescriptorImageInfo::builder()
-				.image_layout(layout)
-				.image_view(image)
-				.build()])
-			.build();
-
 		unsafe {
-			device.update_descriptor_sets(&[write], &[]);
+			device.update_descriptor_sets(
+				&[WriteDescriptorSet::builder()
+					.dst_set(self.set)
+					.dst_binding(1)
+					.dst_array_element(index.get())
+					.descriptor_type(DescriptorType::SAMPLED_IMAGE)
+					.image_info(&[DescriptorImageInfo::builder()
+						.image_layout(layout)
+						.image_view(image)
+						.build()])
+					.build()],
+				&[],
+			);
 		}
 
 		ImageId(index)
@@ -121,19 +149,20 @@ impl Descriptors {
 		let mut inner = self.inner.lock().unwrap();
 
 		let index = inner.storage_images.get_index();
-		let write = WriteDescriptorSet::builder()
-			.dst_set(inner.set)
-			.dst_binding(2)
-			.dst_array_element(index.into())
-			.descriptor_type(DescriptorType::STORAGE_IMAGE)
-			.image_info(&[DescriptorImageInfo::builder()
-				.image_layout(ImageLayout::GENERAL)
-				.image_view(image)
-				.build()])
-			.build();
-
 		unsafe {
-			device.update_descriptor_sets(&[write], &[]);
+			device.update_descriptor_sets(
+				&[WriteDescriptorSet::builder()
+					.dst_set(self.set)
+					.dst_binding(2)
+					.dst_array_element(index.get())
+					.descriptor_type(DescriptorType::STORAGE_IMAGE)
+					.image_info(&[DescriptorImageInfo::builder()
+						.image_layout(ImageLayout::GENERAL)
+						.image_view(image)
+						.build()])
+					.build()],
+				&[],
+			);
 		}
 
 		StorageImageId(index)
@@ -143,16 +172,17 @@ impl Descriptors {
 		let mut inner = self.inner.lock().unwrap();
 
 		let index = inner.samplers.get_index();
-		let write = WriteDescriptorSet::builder()
-			.dst_set(inner.set)
-			.dst_binding(3)
-			.dst_array_element(index.into())
-			.descriptor_type(DescriptorType::SAMPLER)
-			.image_info(&[DescriptorImageInfo::builder().sampler(sampler).build()])
-			.build();
-
 		unsafe {
-			device.update_descriptor_sets(&[write], &[]);
+			device.update_descriptor_sets(
+				&[WriteDescriptorSet::builder()
+					.dst_set(self.set)
+					.dst_binding(3)
+					.dst_array_element(index.get())
+					.descriptor_type(DescriptorType::SAMPLER)
+					.image_info(&[DescriptorImageInfo::builder().sampler(sampler).build()])
+					.build()],
+				&[],
+			);
 		}
 
 		SamplerId(index)
@@ -177,9 +207,6 @@ impl Descriptors {
 		let mut inner = self.inner.lock().unwrap();
 		inner.samplers.return_index(index.0);
 	}
-
-	/// Get a `DescriptorSetLayout` that should be used when making pipelines.
-	pub fn layout(&self) -> DescriptorSetLayout { self.layout }
 
 	pub(super) fn new(device: &Device) -> Result<Self> {
 		let storage_buffer_count = 512 * 1024;
@@ -269,19 +296,17 @@ impl Descriptors {
 			)?[0]
 		};
 
-		let ret = Ok(Descriptors {
+		Ok(Descriptors {
 			pool,
 			layout,
+			set,
 			inner: Mutex::new(Inner {
-				set,
 				storage_buffers: FreeIndices::new(storage_buffer_count),
 				sampled_images: FreeIndices::new(sampled_image_count),
 				storage_images: FreeIndices::new(storage_image_count),
 				samplers: FreeIndices::new(sampler_count),
 			}),
-		});
-
-		ret
+		})
 	}
 
 	pub(super) unsafe fn cleanup(&mut self, device: &Device) {

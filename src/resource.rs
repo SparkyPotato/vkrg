@@ -11,18 +11,21 @@ use ash::vk::{
 	ImageCreateFlags,
 	ImageCreateInfo,
 	ImageLayout,
+	ImageMemoryRequirementsInfo2,
 	ImageSubresourceRange,
 	ImageType,
 	ImageUsageFlags,
 	ImageViewCreateInfo,
 	ImageViewType,
+	MemoryDedicatedRequirements,
+	MemoryRequirements2,
 	SampleCountFlags,
 	SharingMode,
 	REMAINING_ARRAY_LAYERS,
 	REMAINING_MIP_LEVELS,
 };
 use gpu_allocator::{
-	vulkan::{Allocation, AllocationCreateDesc},
+	vulkan::{Allocation, AllocationCreateDesc, AllocationScheme},
 	MemoryLocation,
 };
 
@@ -83,10 +86,6 @@ impl Buffer {
 			}
 		}?;
 
-		let id = usage
-			.contains(BufferUsageFlags::STORAGE_BUFFER)
-			.then(|| device.base_descriptors().get_buffer(device.device(), buffer));
-
 		let alloc = device
 			.allocator()
 			.allocate(&AllocationCreateDesc {
@@ -94,8 +93,19 @@ impl Buffer {
 				requirements: unsafe { device.device().get_buffer_memory_requirements(buffer) },
 				location,
 				linear: true,
+				allocation_scheme: AllocationScheme::GpuAllocatorManaged,
 			})
 			.map_err(|e| Error::Message(e.to_string()))?;
+
+		unsafe {
+			device
+				.device()
+				.bind_buffer_memory(buffer, alloc.memory(), alloc.offset())?;
+		}
+
+		let id = usage
+			.contains(BufferUsageFlags::STORAGE_BUFFER)
+			.then(|| device.base_descriptors().get_buffer(device.device(), buffer));
 
 		Ok(Self {
 			inner: buffer,
@@ -235,15 +245,38 @@ impl Resource for Image {
 			)?
 		};
 
+		let (requirements, allocation_scheme) = unsafe {
+			let mut dedicated = MemoryDedicatedRequirements::default();
+			let mut out = MemoryRequirements2::builder().push_next(&mut dedicated);
+			device
+				.device()
+				.get_image_memory_requirements2(&ImageMemoryRequirementsInfo2::builder().image(image), &mut out);
+
+			(
+				out.memory_requirements,
+				match dedicated.prefers_dedicated_allocation != 0 || dedicated.requires_dedicated_allocation != 0 {
+					true => AllocationScheme::DedicatedImage(image),
+					false => AllocationScheme::GpuAllocatorManaged,
+				},
+			)
+		};
+
 		let alloc = device
 			.allocator()
 			.allocate(&AllocationCreateDesc {
 				name: "Graph Image",
-				requirements: unsafe { device.device().get_image_memory_requirements(image) },
+				requirements,
 				location: MemoryLocation::GpuOnly,
 				linear: false,
+				allocation_scheme,
 			})
 			.map_err(|e| Error::Message(e.to_string()))?;
+
+		unsafe {
+			device
+				.device()
+				.bind_image_memory(image, alloc.memory(), alloc.offset())?;
+		}
 
 		Ok(Self { inner: image, alloc })
 	}

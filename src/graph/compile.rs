@@ -80,7 +80,7 @@ pub struct GpuResource<'graph, H, U> {
 pub struct SyncedResource<'graph, H, U, A> {
 	pub resource: GpuResource<'graph, H, U>,
 	pub pre_sync: ExternalSync<A>,
-	pub post_sync: ExternalSync<Access>,
+	pub post_sync: ExternalSync<A>,
 }
 
 pub enum Resource<'graph> {
@@ -204,7 +204,7 @@ enum ResourceDescType<'graph> {
 	ExternalImage {
 		desc: GpuResource<'graph, Image, ImageUsage>,
 		pre_sync: ExternalSync<ImageAccess>,
-		post_sync: ExternalSync<Access>,
+		post_sync: ExternalSync<ImageAccess>,
 	},
 }
 
@@ -379,7 +379,11 @@ impl<'graph> VirtualResourceType<'graph> {
 					post_sync: ExternalSync {
 						semaphore: img.post_sync.semaphore,
 						value: img.post_sync.value,
-						access: img.post_sync.access,
+						access: ImageAccess {
+							access: img.post_sync.access.access,
+							layout: img.post_sync.access.layout,
+							format: write_usage.format,
+						},
 					},
 				}
 			},
@@ -862,7 +866,7 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 			pre_sync: Vec::new_in(self.resource_map.arena()),
 			post_sync: Vec::new_in(self.resource_map.arena()),
 		})
-		.take(self.passes.len())
+		.take(self.passes.len() + 1)
 		.collect_in(self.resource_map.arena());
 
 		for buffer in self.resource_map.buffers() {
@@ -903,16 +907,14 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 		}
 
 		for image in self.resource_map.images() {
-			let mut prev_access = (image.pre_sync.semaphore == Semaphore::null())
-				.then(|| {
-					let access = image.pre_sync.access;
-					if access.access.access != AccessFlags2::NONE || access.access.stage != PipelineStageFlags2::NONE {
-						Some(access)
-					} else {
-						None
-					}
-				})
-				.flatten();
+			let mut prev_access = {
+				let access = image.pre_sync.access;
+				if access.access.access != AccessFlags2::NONE || access.access.stage != PipelineStageFlags2::NONE {
+					Some(access)
+				} else {
+					None
+				}
+			};
 
 			for (pass, access) in MergeReads::new(image.resource.usages.iter().map(|(&x, &y)| {
 				(
@@ -923,10 +925,10 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 					},
 				)
 			})) {
-				let sync = &mut sync[pass as usize];
+				let curr_sync = &mut sync[pass as usize];
 				if let Some(prev) = prev_access {
 					if prev.layout == access.access.layout {
-						if let Some(barrier) = sync.barriers.get_mut(&prev.access) {
+						if let Some(barrier) = curr_sync.barriers.get_mut(&prev.access) {
 							// If there's no layout transition and an existing memory barrier, merge ourselves with it.
 							*barrier = barrier.merge(&access.access.access).unwrap();
 							prev_access = Some(ImageAccess {
@@ -938,7 +940,7 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 						}
 					}
 
-					sync.image_barriers.push(image_barrier(
+					curr_sync.image_barriers.push(image_barrier(
 						image.resource.handle,
 						prev,
 						access.access,
@@ -949,14 +951,42 @@ impl<'temp, 'graph> Synchronizer<'temp, 'graph> {
 				}
 
 				if image.pre_sync.semaphore != Semaphore::null() {
-					sync.pre_sync.push(ExternalSync {
+					curr_sync.pre_sync.push(ExternalSync {
 						semaphore: image.pre_sync.semaphore,
 						value: image.pre_sync.value,
 						access: image.pre_sync.access.access,
 					});
 				}
 				if image.post_sync.semaphore != Semaphore::null() {
-					sync.post_sync.push(image.post_sync);
+					curr_sync.post_sync.push(ExternalSync {
+						semaphore: image.post_sync.semaphore,
+						value: image.post_sync.value,
+						access: image.post_sync.access.access,
+					});
+					if image.post_sync.access.access.access != AccessFlags2::NONE
+						|| image.post_sync.access.access.stage != PipelineStageFlags2::NONE
+					{
+						sync[pass as usize + 1].image_barriers.push(
+							ImageMemoryBarrier2::builder()
+								.image(image.resource.handle)
+								.subresource_range(
+									ImageSubresourceRange::builder()
+										.base_mip_level(0)
+										.base_array_layer(0)
+										.level_count(REMAINING_MIP_LEVELS)
+										.layer_count(REMAINING_ARRAY_LAYERS)
+										.aspect_mask(image_aspect_mask(access.access.format))
+										.build(),
+								)
+								.src_stage_mask(access.access.access.stage)
+								.src_access_mask(access.access.access.access)
+								.old_layout(access.access.layout)
+								.dst_stage_mask(image.post_sync.access.access.stage)
+								.dst_access_mask(image.post_sync.access.access.access)
+								.new_layout(image.post_sync.access.layout)
+								.build(),
+						);
+					}
 				}
 			}
 		}

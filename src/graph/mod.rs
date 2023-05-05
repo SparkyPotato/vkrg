@@ -46,6 +46,7 @@ use crate::{
 	resource::{GpuBuffer, GpuBufferHandle, Image, ImageView, UploadBuffer, UploadBufferHandle},
 	Result,
 };
+use crate::graph::compile::Synchronization;
 
 mod cache;
 mod compile;
@@ -53,6 +54,21 @@ mod frame_data;
 mod virtual_resource;
 
 const FRAMES_IN_FLIGHT: usize = 2;
+
+/// A snapshot of the GPU execution state of the render graph.
+pub struct ExecutionSnapshot {
+	values: [u64; FRAMES_IN_FLIGHT],
+}
+
+impl ExecutionSnapshot {
+	pub fn is_complete(&self, graph: &RenderGraph) -> bool {
+		graph
+			.frame_data
+			.iter()
+			.zip(self.values)
+			.all(|(frame, value)| frame.semaphore.value() > value)
+	}
+}
 
 /// The render graph.
 pub struct RenderGraph {
@@ -95,6 +111,18 @@ impl RenderGraph {
 			arena,
 			passes: Vec::new_in(arena),
 			virtual_resources: Vec::new_in(arena),
+		}
+	}
+
+	pub fn snapshot(&self) -> ExecutionSnapshot {
+		ExecutionSnapshot {
+			values: {
+				let mut x = [0; FRAMES_IN_FLIGHT];
+				for (x, frame) in x.iter_mut().zip(self.frame_data.iter()) {
+					*x = frame.semaphore.value();
+				}
+				x
+			},
 		}
 	}
 
@@ -152,37 +180,15 @@ impl<'pass, 'graph> Frame<'pass, 'graph> {
 		let graph = compiled.graph;
 		let mut submitter = Submitter::new(arena, &mut graph.frame_data, graph.curr_frame);
 
-		for (i, (pass, sync)) in compiled.passes.into_iter().zip(compiled.sync).enumerate() {
+		let mut sync = compiled.sync.into_iter();
+		for (i, (pass, sync)) in compiled.passes.into_iter().zip(&mut sync).enumerate() {
 			{
 				let name = unsafe { std::str::from_utf8_unchecked(&pass.name[..pass.name.len() - 1]) };
 				let span = span!(Level::TRACE, "run pass", name = name);
 				let _e = span.enter();
 
 				let buf = submitter.pass(&device, &sync.pre_sync, &sync.post_sync)?;
-
-				let barriers: Vec<_, _> = sync
-					.barriers
-					.into_iter()
-					.map(|(from, to)| {
-						MemoryBarrier2::builder()
-							.src_stage_mask(from.stage)
-							.src_access_mask(from.access)
-							.dst_stage_mask(to.stage)
-							.dst_access_mask(to.access)
-							.build()
-					})
-					.collect_in(arena);
-
-				unsafe {
-					if !barriers.is_empty() || !sync.image_barriers.is_empty() {
-						device.device().cmd_pipeline_barrier2(
-							buf,
-							&DependencyInfo::builder()
-								.memory_barriers(&barriers)
-								.image_memory_barriers(&sync.image_barriers),
-						);
-					}
-				}
+				gen_barrier_command(arena, device, buf, sync);
 
 				(pass.callback)(PassContext {
 					arena,
@@ -195,13 +201,43 @@ impl<'pass, 'graph> Frame<'pass, 'graph> {
 				});
 			}
 		}
-
+		
+		if let Some(sync) = sync.next() {
+			let buf = submitter.pass(&device, &sync.pre_sync, &sync.post_sync)?;
+			gen_barrier_command(arena, device, buf, sync);
+		}
 		submitter.finish(device)?;
 
 		let len = compiled.resource_map.cleanup();
 		graph.next_frame(len);
 
 		Ok(())
+	}
+}
+
+fn gen_barrier_command(arena: &Arena, device: &Device, buf: CommandBuffer, sync: Synchronization) {
+	let barriers: Vec<_, _> = sync
+		.barriers
+		.into_iter()
+		.map(|(from, to)| {
+			MemoryBarrier2::builder()
+				.src_stage_mask(from.stage)
+				.src_access_mask(from.access)
+				.dst_stage_mask(to.stage)
+				.dst_access_mask(to.access)
+				.build()
+		})
+		.collect_in(arena);
+
+	unsafe {
+		if !barriers.is_empty() || !sync.image_barriers.is_empty() {
+			device.device().cmd_pipeline_barrier2(
+				buf,
+				&DependencyInfo::builder()
+					.memory_barriers(&barriers)
+					.image_memory_barriers(&sync.image_barriers),
+			);
+		}
 	}
 }
 

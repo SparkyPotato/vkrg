@@ -180,7 +180,7 @@ pub struct ExternalBuffer {
 pub struct ExternalImage {
 	pub handle: ash::vk::Image,
 	pub pre_sync: ExternalSync<ImageAccess>,
-	pub post_sync: ExternalSync<Access>,
+	pub post_sync: ExternalSync<ImageAccess>,
 }
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
