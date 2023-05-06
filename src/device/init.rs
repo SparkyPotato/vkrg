@@ -109,6 +109,20 @@ impl Device {
 		.map(|x| (x.0, x.1.unwrap()))
 	}
 
+	/// # Safety
+	/// `window` and `display` must outlive this `Device`.
+	/// The returned `Surface` must be destroyed before the `Device` is dropped.
+	pub unsafe fn create_surface(
+		&self, window: &dyn HasRawWindowHandle, display: &dyn HasRawDisplayHandle,
+	) -> Result<SurfaceKHR> {
+		Self::create_surface_inner(
+			&self.entry,
+			&self.instance,
+			window.raw_window_handle(),
+			display.raw_display_handle(),
+		)
+	}
+
 	unsafe fn new_inner(
 		window: Option<(RawWindowHandle, RawDisplayHandle)>, layers: &[&'static CStr],
 		instance_extensions: &[&'static CStr], device_extensions: &[&'static CStr],
@@ -119,7 +133,7 @@ impl Device {
 
 		let surface = window.map(|(window, display)| {
 			let surface_ext = Surface::new(&entry, &instance);
-			let surface = Self::create_surface(&entry, &instance, window, display);
+			let surface = Self::create_surface_inner(&entry, &instance, window, display);
 			(surface, surface_ext)
 		});
 
@@ -278,7 +292,7 @@ impl Device {
 		})
 	}
 
-	unsafe fn create_surface(
+	unsafe fn create_surface_inner(
 		entry: &Entry, instance: &Instance, window: RawWindowHandle, display: RawDisplayHandle,
 	) -> Result<SurfaceKHR> {
 		match (window, display) {
@@ -479,7 +493,11 @@ impl Device {
 		instance: &Instance, surface: Option<(&Surface, SurfaceKHR)>, user_extensions: &[&'static CStr],
 	) -> Result<(ash::Device, PhysicalDevice, Queues<QueueData>)> {
 		let (physical_device, queues) = Self::select_physical_device(instance, surface)?;
-		let mut extensions = vec![Swapchain::name()];
+		let mut extensions = if surface.is_some() {
+			vec![Swapchain::name(), Surface::name()]
+		} else {
+			Vec::new()
+		};
 		extensions.extend_from_slice(user_extensions);
 		trace!("using device extensions: {:?}", extensions);
 		let extensions: Vec<_> = extensions.into_iter().map(|extension| extension.as_ptr()).collect();

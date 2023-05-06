@@ -53,10 +53,7 @@ pub fn run<T: App>() -> ! {
 
 	let mut arena = Arena::new();
 
-	let (device, surface) = unsafe {
-		Device::with_window_and_layers_and_extensions(&window, &event_loop, &[], &[], &[khr::Swapchain::name()])
-			.unwrap()
-	};
+	let (device, surface) = unsafe { Device::with_window(&window, &event_loop).unwrap() };
 	let mut swapchain = ManuallyDrop::new(Swapchain::new(&device, surface, &window));
 	let mut graph = ManuallyDrop::new(RenderGraph::new(&device).unwrap());
 	let mut app = ManuallyDrop::new(T::create(&device));
