@@ -7,6 +7,7 @@ edition = "2021"
 vkrg = { path = "../..", features = ["bytemuck"] }
 
 bytemuck = { version = "1.13.1", features = ["derive"] }
+image = "0.24.6"
 naga = { git = "https://github.com/gfx-rs/naga", features = ["wgsl-in", "spv-out"] }
 vek = "0.15.10"
 winit = "0.28.3"

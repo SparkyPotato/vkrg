@@ -185,7 +185,7 @@ impl Device {
 					.application_info(
 						&ApplicationInfo::builder()
 							.application_name(CStr::from_bytes_with_nul(b"sus\0").unwrap())
-							.engine_name(CStr::from_bytes_with_nul(b"rkvg\0").unwrap())
+							.engine_name(CStr::from_bytes_with_nul(b"vkrg\0").unwrap())
 							.api_version(ash::vk::make_api_version(0, 1, 3, 0)),
 					)
 					.enabled_layer_names(&layers.into_iter().map(|x| x.as_ptr()).collect::<Vec<_>>())
@@ -241,12 +241,12 @@ impl Device {
 			None
 		};
 
-		let mut window_extensions: Vec<&CStr> = Self::get_window_extensions(window)?.to_vec();
+		let mut extensions: Vec<&CStr> = Self::get_window_extensions(window)?.to_vec();
 		if validation.is_some() {
-			window_extensions.push(DebugUtils::name());
+			extensions.push(DebugUtils::name());
 		}
 
-		Ok((validation.into_iter().collect(), window_extensions))
+		Ok((validation.into_iter().collect(), extensions))
 	}
 
 	fn get_window_extensions(handle: Option<RawWindowHandle>) -> Result<&'static [&'static CStr]> {

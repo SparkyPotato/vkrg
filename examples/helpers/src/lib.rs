@@ -22,6 +22,7 @@ use winit::{
 use crate::swapchain::Swapchain;
 
 pub mod cmd;
+pub mod load;
 pub mod misc;
 pub mod pipeline;
 

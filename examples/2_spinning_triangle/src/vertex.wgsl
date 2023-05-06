@@ -37,14 +37,9 @@ fn main(@builtin(vertex_index) id: u32) -> Output {
         default: {}
     }
 
-    let aspect = mat4x4(
-        1.0 / pc.aspect_ratio, 0.0, 0.0, 0.0,
-        0.0,                   1.0, 0.0, 0.0,
-        0.0,                   0.0, 1.0, 0.0,
-        0.0,                   0.0, 0.0, 1.0,
-    );
+    let aspect = vec4(1.0 / pc.aspect_ratio, 1.0, 1.0, 1.0);
     let transform = buffers[pc.id].inner[0];
     let pos4 = vec4(pos, 0.0, 1.0);
 
-    return Output(aspect * transform * pos4, color);
+    return Output(transform * pos4 * aspect, color);
 }
